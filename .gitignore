@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+.omk/
+.omx/
+npm-debug.log*

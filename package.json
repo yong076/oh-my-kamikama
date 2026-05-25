@@ -1,0 +1,40 @@
+{
+  "name": "oh-my-kamikama",
+  "version": "0.1.0",
+  "description": "One command that makes Claude, Gemini, and Codex work together.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "omk": "bin/omk"
+  },
+  "files": [
+    "bin",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "bash -n bin/omk && ./bin/omk doctor"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "codex",
+    "claude",
+    "gemini",
+    "orchestration",
+    "agents",
+    "coding-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yong076/oh-my-kamikama.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yong076/oh-my-kamikama/issues"
+  },
+  "homepage": "https://github.com/yong076/oh-my-kamikama#readme"
+}

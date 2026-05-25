@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omk "task"
+  omk run [--repo PATH] "task"
+  omk advise [--repo PATH] "task"
+  omk status
+  omk doctor
+
+What runs:
+  claude  Advisor pass, read-only/plan oriented
+  gemini  Advisor pass, read-only/plan oriented
+  codex   Final executor pass, informed by both advisor artifacts
+
+Options:
+  -C, --repo PATH   Target repository/workspace. Defaults to current directory.
+  -h, --help        Show help.
+
+Environment:
+  OMK_KEEP_GOING=1  Continue to Codex even if an advisor fails.
+EOF
+}
+
+die() {
+  echo "omk: $*" >&2
+  exit 1
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+require_cmd() {
+  have_cmd "$1" || die "missing required command: $1"
+}
+
+slugify() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+    | cut -c1-54
+}
+
+now_utc() {
+  date -u '+%Y-%m-%dT%H-%M-%SZ'
+}
+
+cmd_version() {
+  local cmd="$1"
+  if ! have_cmd "$cmd"; then
+    printf '%-8s missing\n' "$cmd"
+    return 0
+  fi
+
+  local version
+  case "$cmd" in
+    claude) version="$("$cmd" --version 2>/dev/null || true)" ;;
+    gemini) version="$("$cmd" --version 2>/dev/null || true)" ;;
+    codex) version="$("$cmd" --version 2>/dev/null || true)" ;;
+    omx) version="$("$cmd" --version 2>/dev/null | head -n 1 || true)" ;;
+    *) version="" ;;
+  esac
+
+  if [[ -n "$version" ]]; then
+    printf '%-8s %s (%s)\n' "$cmd" "$(command -v "$cmd")" "$version"
+  else
+    printf '%-8s %s\n' "$cmd" "$(command -v "$cmd")"
+  fi
+}
+
+status() {
+  echo "oh-my-kamikama $VERSION"
+  echo "======================"
+  cmd_version claude
+  cmd_version codex
+  cmd_version gemini
+  cmd_version omx
+}
+
+doctor() {
+  status
+  echo
+
+  local failed=0
+  for cmd in claude codex gemini; do
+    if have_cmd "$cmd"; then
+      echo "[OK] $cmd found"
+    else
+      echo "[FAIL] $cmd missing"
+      failed=1
+    fi
+  done
+
+  if have_cmd omx; then
+    echo "[OK] omx found (optional)"
+  else
+    echo "[OK] omx not installed (optional)"
+  fi
+
+  return "$failed"
+}
+
+parse_repo_and_task() {
+  repo="$PWD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo|-C)
+        [[ $# -ge 2 ]] || die "--repo requires a path"
+        repo="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [[ $# -gt 0 ]] || die "missing task"
+  task="$*"
+  repo="$(cd "$repo" && pwd)"
+}
+
+prepare_run_dir() {
+  local repo_path="$1"
+  local task_text="$2"
+  local base_slug
+  base_slug="$(slugify "$task_text")"
+  [[ -n "$base_slug" ]] || base_slug="task"
+
+  local root="$repo_path/.omk/runs"
+  local dir="$root/$(now_utc)-$base_slug"
+  mkdir -p "$dir"
+  printf '%s\n' "$task_text" >"$dir/task.txt"
+  echo "$dir"
+}
+
+advisor_prompt() {
+  local provider="$1"
+  local repo_path="$2"
+  local task_text="$3"
+
+  cat <<EOF
+You are the $provider advisor in an oh-my-kamikama run.
+
+Repository:
+$repo_path
+
+Task:
+$task_text
+
+Return concise markdown with exactly these sections:
+- Recommended approach
+- Risks
+- Verification
+- What Codex should avoid
+
+Do not edit files. Do not perform implementation. Keep this advisory.
+EOF
+}
+
+write_advisor_markdown() {
+  local provider="$1"
+  local exit_code="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+  local target_file="$5"
+
+  {
+    echo "# $provider advisor"
+    echo
+    echo "- Provider: $provider"
+    echo "- Exit code: $exit_code"
+    echo "- Created: $(now_utc)"
+    echo
+    echo "## Output"
+    echo
+    echo '```text'
+    cat "$stdout_file" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Diagnostics"
+    echo
+    echo '```text'
+    cat "$stderr_file" 2>/dev/null || true
+    echo '```'
+  } >"$target_file"
+}
+
+run_claude_advisor() {
+  local repo_path="$1"
+  local prompt="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+
+  (
+    cd "$repo_path"
+    claude --print --permission-mode plan "$prompt"
+  ) >"$stdout_file" 2>"$stderr_file"
+}
+
+run_gemini_advisor() {
+  local repo_path="$1"
+  local prompt="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+
+  (
+    cd "$repo_path"
+    GEMINI_CLI_TRUST_WORKSPACE=true gemini \
+      --skip-trust \
+      --approval-mode plan \
+      --prompt "$prompt"
+  ) >"$stdout_file" 2>"$stderr_file"
+}
+
+run_advisors() {
+  local repo_path="$1"
+  local task_text="$2"
+  local run_dir="$3"
+
+  require_cmd claude
+  require_cmd gemini
+
+  local claude_prompt gemini_prompt
+  claude_prompt="$(advisor_prompt claude "$repo_path" "$task_text")"
+  gemini_prompt="$(advisor_prompt gemini "$repo_path" "$task_text")"
+
+  run_claude_advisor "$repo_path" "$claude_prompt" "$run_dir/claude.out" "$run_dir/claude.err" &
+  local claude_pid=$!
+  run_gemini_advisor "$repo_path" "$gemini_prompt" "$run_dir/gemini.out" "$run_dir/gemini.err" &
+  local gemini_pid=$!
+
+  local claude_status=0
+  local gemini_status=0
+  wait "$claude_pid" || claude_status=$?
+  wait "$gemini_pid" || gemini_status=$?
+
+  write_advisor_markdown claude "$claude_status" "$run_dir/claude.out" "$run_dir/claude.err" "$run_dir/claude.md"
+  write_advisor_markdown gemini "$gemini_status" "$run_dir/gemini.out" "$run_dir/gemini.err" "$run_dir/gemini.md"
+
+  if [[ "$claude_status" -ne 0 || "$gemini_status" -ne 0 ]]; then
+    return 1
+  fi
+}
+
+codex_prompt() {
+  local repo_path="$1"
+  local task_text="$2"
+  local run_dir="$3"
+
+  cat <<EOF
+You are the Codex executor in an oh-my-kamikama run.
+
+Repository:
+$repo_path
+
+Task:
+$task_text
+
+Before implementation, read these advisor artifacts:
+- $run_dir/claude.md
+- $run_dir/gemini.md
+
+Use the advisors as context, not authority. Preserve unrelated user changes.
+Keep scope tight. Run focused verification. Finish with a concise summary of
+changes and verification.
+EOF
+}
+
+run_codex_executor() {
+  local repo_path="$1"
+  local prompt="$2"
+  local run_dir="$3"
+
+  require_cmd codex
+  (
+    cd "$repo_path"
+    codex exec \
+      --skip-git-repo-check \
+      -C "$repo_path" \
+      -s workspace-write \
+      "$prompt"
+  ) >"$run_dir/codex.out" 2>"$run_dir/codex.err"
+}
+
+write_run_summary() {
+  local mode="$1"
+  local repo_path="$2"
+  local task_text="$3"
+  local run_dir="$4"
+
+  {
+    echo "# oh-my-kamikama run"
+    echo
+    echo "- Mode: $mode"
+    echo "- Repository: $repo_path"
+    echo "- Created: $(now_utc)"
+    echo
+    echo "## Task"
+    echo
+    printf '%s\n' "$task_text"
+    echo
+    echo "## Artifacts"
+    echo
+    echo "- Claude: $run_dir/claude.md"
+    echo "- Gemini: $run_dir/gemini.md"
+    if [[ -f "$run_dir/codex.out" || -f "$run_dir/codex.err" ]]; then
+      echo "- Codex stdout: $run_dir/codex.out"
+      echo "- Codex stderr: $run_dir/codex.err"
+    fi
+  } >"$run_dir/RUN.md"
+}
+
+run_pipeline() {
+  local mode="$1"
+  shift
+  parse_repo_and_task "$@"
+
+  local run_dir
+  run_dir="$(prepare_run_dir "$repo" "$task")"
+
+  echo "omk run dir: $run_dir"
+  echo "running advisors: claude + gemini"
+
+  local advisor_status=0
+  run_advisors "$repo" "$task" "$run_dir" || advisor_status=$?
+
+  write_run_summary "$mode" "$repo" "$task" "$run_dir"
+
+  if [[ "$advisor_status" -ne 0 ]]; then
+    echo "one or more advisors failed; see $run_dir" >&2
+    if [[ "${OMK_KEEP_GOING:-0}" != "1" || "$mode" == "advise" ]]; then
+      echo "advisor artifacts:"
+      echo "  $run_dir/claude.md"
+      echo "  $run_dir/gemini.md"
+      return "$advisor_status"
+    fi
+  fi
+
+  if [[ "$mode" == "advise" ]]; then
+    echo "advisor artifacts:"
+    echo "  $run_dir/claude.md"
+    echo "  $run_dir/gemini.md"
+    return 0
+  fi
+
+  local prompt
+  prompt="$(codex_prompt "$repo" "$task" "$run_dir")"
+  printf '%s\n' "$prompt" >"$run_dir/codex.prompt.md"
+
+  echo "running executor: codex"
+  local codex_status=0
+  run_codex_executor "$repo" "$prompt" "$run_dir" || codex_status=$?
+  write_run_summary "$mode" "$repo" "$task" "$run_dir"
+
+  if [[ -s "$run_dir/codex.out" ]]; then
+    cat "$run_dir/codex.out"
+  fi
+  if [[ "$codex_status" -ne 0 ]]; then
+    echo "codex failed; stderr: $run_dir/codex.err" >&2
+    return "$codex_status"
+  fi
+
+  echo "omk artifacts: $run_dir"
+}
+
+main() {
+  [[ $# -gt 0 ]] || {
+    usage
+    exit 0
+  }
+
+  case "$1" in
+    run)
+      shift
+      run_pipeline run "$@"
+      ;;
+    advise)
+      shift
+      run_pipeline advise "$@"
+      ;;
+    status)
+      shift
+      status "$@"
+      ;;
+    doctor)
+      shift
+      doctor "$@"
+      ;;
+    help|--help|-h)
+      usage
+      ;;
+    --version|-v)
+      echo "$VERSION"
+      ;;
+    *)
+      run_pipeline run "$@"
+      ;;
+  esac
+}
+
+main "$@"
