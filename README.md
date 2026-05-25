@@ -55,6 +55,15 @@ omk status
 omk doctor
 ```
 
+Run the quantitative smoke test:
+
+```bash
+scripts/quant-smoke.sh 2
+```
+
+It installs the local package globally, runs `omk run` repeatedly, and writes a
+CSV with exit codes, latency, Codex sentinel detection, and artifact counts.
+
 ## Pipeline
 
 1. Claude advisor

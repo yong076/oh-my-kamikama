@@ -2,4 +2,5 @@
 node_modules/
 .omk/
 .omx/
+tmp/
 npm-debug.log*
