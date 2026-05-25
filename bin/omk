@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 usage() {
   cat <<'EOF'
@@ -9,6 +9,12 @@ Usage:
   omk "task"
   omk run [--repo PATH] "task"
   omk advise [--repo PATH] "task"
+  omk bg [--repo PATH] "task"
+  omk ps [--repo PATH]
+  omk logs [--repo PATH] [job-id|latest]
+  omk tail [--repo PATH] [job-id|latest]
+  omk kill [--repo PATH] <job-id|latest>
+  omk tools
   omk status
   omk doctor
 
@@ -62,7 +68,9 @@ cmd_version() {
     claude) version="$("$cmd" --version 2>/dev/null || true)" ;;
     gemini) version="$("$cmd" --version 2>/dev/null || true)" ;;
     codex) version="$("$cmd" --version 2>/dev/null || true)" ;;
+    opencode) version="$("$cmd" --version 2>/dev/null || true)" ;;
     omx) version="$("$cmd" --version 2>/dev/null | head -n 1 || true)" ;;
+    cmux) version="$("$cmd" version 2>/dev/null || true)" ;;
     *) version="" ;;
   esac
 
@@ -79,7 +87,31 @@ status() {
   cmd_version claude
   cmd_version codex
   cmd_version gemini
+  cmd_version opencode
   cmd_version omx
+  cmd_version cmux
+}
+
+tools() {
+  status
+  echo
+  echo "Core pipeline"
+  echo "-------------"
+  echo "claude  advisor: plan/risk/verification lane"
+  echo "gemini  advisor: alternate plan/risk/verification lane"
+  echo "codex   executor: final implementation and focused verification"
+  echo
+  echo "Optional adapters"
+  echo "-----------------"
+  echo "opencode  scout/reviewer lane via 'opencode run' or cmux omo"
+  echo "omx       durable goals/team/HUD lane via 'omx ultragoal' and 'omx team'"
+  echo "cmux      pane/surface visibility for long-running background work"
+  echo
+  echo "Recommended modes"
+  echo "-----------------"
+  echo "omk advise  cheap-ish interrogation before code"
+  echo "omk run     full Claude + Gemini + Codex pipeline"
+  echo "omk bg      same pipeline in the background with logs and status"
 }
 
 doctor() {
@@ -96,13 +128,37 @@ doctor() {
     fi
   done
 
-  if have_cmd omx; then
-    echo "[OK] omx found (optional)"
-  else
-    echo "[OK] omx not installed (optional)"
-  fi
+  for cmd in opencode omx cmux; do
+    if have_cmd "$cmd"; then
+      echo "[OK] $cmd found (optional)"
+    else
+      echo "[OK] $cmd not installed (optional)"
+    fi
+  done
 
   return "$failed"
+}
+
+parse_repo_only() {
+  repo="$PWD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo|-C)
+        [[ $# -ge 2 ]] || die "--repo requires a path"
+        repo="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  repo="$(cd "$repo" && pwd)"
+  extra_args=("$@")
 }
 
 parse_repo_and_task() {
@@ -159,11 +215,16 @@ $task_text
 
 Return concise markdown with exactly these sections:
 - Recommended approach
+- Dive questions
+- AI-DLC phase and gates
 - Risks
 - Verification
 - What Codex should avoid
 
-Do not edit files. Do not perform implementation. Keep this advisory.
+Use the divecode genie principle: if the user made a vague wish, surface the
+missing constraints before anyone grants it literally. Map the task to
+AI-DLC: Inception, Construction, or Operations. Do not edit files. Do not
+perform implementation. Keep this advisory.
 EOF
 }
 
@@ -271,8 +332,13 @@ Before implementation, read these advisor artifacts:
 - $run_dir/gemini.md
 
 Use the advisors as context, not authority. Preserve unrelated user changes.
-Keep scope tight. Run focused verification. Finish with a concise summary of
-changes and verification.
+Apply the divecode genie principle: when the wish is underspecified, do not
+silently invent high-risk requirements. Make reversible progress, record open
+questions, and keep the user-facing result coherent. Apply AI-DLC gates:
+Inception before broad design, Construction with tests/verification, Operations
+with handoff notes when shipping behavior changes. Spend context aggressively
+when it improves correctness; token thrift is not the goal of this run.
+Finish with a concise summary of changes and verification.
 EOF
 }
 
@@ -373,6 +439,171 @@ run_pipeline() {
   echo "omk artifacts: $run_dir"
 }
 
+bg_root_for_repo() {
+  local repo_path="$1"
+  echo "$repo_path/.omk/bg"
+}
+
+resolve_job_dir() {
+  local repo_path="$1"
+  local token="${2:-latest}"
+  local root
+  root="$(bg_root_for_repo "$repo_path")"
+
+  [[ -d "$root" ]] || die "no background jobs in $root"
+
+  if [[ "$token" == "latest" ]]; then
+    find "$root" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1
+    return 0
+  fi
+
+  if [[ -d "$root/$token" ]]; then
+    echo "$root/$token"
+    return 0
+  fi
+
+  local matches
+  matches="$(find "$root" -mindepth 1 -maxdepth 1 -type d -name "$token*" | sort || true)"
+  local count
+  count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+  [[ "$count" -eq 1 ]] || die "job id '$token' matched $count jobs"
+  printf '%s\n' "$matches"
+}
+
+job_id_from_dir() {
+  basename "$1"
+}
+
+bg_run() {
+  parse_repo_and_task "$@"
+
+  local root id job_dir self
+  root="$(bg_root_for_repo "$repo")"
+  id="$(now_utc)-$(slugify "$task")"
+  job_dir="$root/$id"
+  self="${BASH_SOURCE[0]}"
+
+  mkdir -p "$job_dir"
+  printf '%s\n' "$repo" >"$job_dir/repo.txt"
+  printf '%s\n' "$task" >"$job_dir/task.txt"
+  printf '%s\n' "running" >"$job_dir/status"
+  now_utc >"$job_dir/started.txt"
+
+  local self_q repo_q task_q job_dir_q
+  self_q="$(printf '%q' "$self")"
+  repo_q="$(printf '%q' "$repo")"
+  task_q="$(printf '%q' "$task")"
+  job_dir_q="$(printf '%q' "$job_dir")"
+
+  cat >"$job_dir/run.sh" <<EOF
+#!/usr/bin/env bash
+set +e
+finish_job() {
+  code="\${1:-\$?}"
+  if [[ ! -f $job_dir_q/exit_code ]]; then
+    printf '%s\n' "\$code" >$job_dir_q/exit_code
+    date -u '+%Y-%m-%dT%H-%M-%SZ' >$job_dir_q/finished.txt
+    if [[ "\$code" -eq 0 ]]; then
+      printf '%s\n' "done" >$job_dir_q/status
+    else
+      printf '%s\n' "failed" >$job_dir_q/status
+    fi
+  fi
+}
+trap 'finish_job \$?' EXIT
+trap 'finish_job 143; exit 143' HUP INT TERM
+
+$self_q run --repo $repo_q $task_q >$job_dir_q/stdout.log 2>$job_dir_q/stderr.log
+code="\$?"
+printf '%s\n' "\$code" >$job_dir_q/exit_code
+date -u '+%Y-%m-%dT%H-%M-%SZ' >$job_dir_q/finished.txt
+if [[ "\$code" -eq 0 ]]; then
+  printf '%s\n' "done" >$job_dir_q/status
+else
+  printf '%s\n' "failed" >$job_dir_q/status
+fi
+sed -n 's/^omk artifacts: //p' $job_dir_q/stdout.log | tail -n 1 >$job_dir_q/run_dir.txt
+trap - EXIT HUP INT TERM
+exit "\$code"
+EOF
+  chmod +x "$job_dir/run.sh"
+
+  nohup bash "$job_dir/run.sh" >"$job_dir/supervisor.log" 2>&1 &
+  printf '%s\n' "$!" >"$job_dir/pid"
+
+  echo "omk bg started"
+  echo "id: $id"
+  echo "pid: $(cat "$job_dir/pid")"
+  echo "job: $job_dir"
+  echo "logs: omk logs --repo '$repo' $id"
+  echo "tail: omk tail --repo '$repo' $id"
+}
+
+ps_jobs() {
+  parse_repo_only "$@"
+  local root
+  root="$(bg_root_for_repo "$repo")"
+  if [[ ! -d "$root" ]]; then
+    echo "no jobs"
+    return 0
+  fi
+
+  printf '%-58s %-10s %-8s %s\n' "job" "status" "pid" "task"
+  find "$root" -mindepth 1 -maxdepth 1 -type d | sort | while read -r job_dir; do
+    local id status pid task
+    id="$(job_id_from_dir "$job_dir")"
+    status="$(cat "$job_dir/status" 2>/dev/null || echo unknown)"
+    pid="$(cat "$job_dir/pid" 2>/dev/null || echo -)"
+    task="$(cat "$job_dir/task.txt" 2>/dev/null | head -n 1 || true)"
+    if [[ "$status" == "running" && "$pid" != "-" ]] && ! ps -p "$pid" >/dev/null 2>&1; then
+      status="lost"
+    fi
+    printf '%-58s %-10s %-8s %s\n' "$id" "$status" "$pid" "$task"
+  done
+}
+
+logs_job() {
+  parse_repo_only "$@"
+  local token="${extra_args[0]:-latest}"
+  local job_dir
+  job_dir="$(resolve_job_dir "$repo" "$token")"
+  echo "# $(job_id_from_dir "$job_dir")"
+  echo
+  echo "status: $(cat "$job_dir/status" 2>/dev/null || echo unknown)"
+  echo "pid: $(cat "$job_dir/pid" 2>/dev/null || echo -)"
+  echo "repo: $(cat "$job_dir/repo.txt" 2>/dev/null || echo -)"
+  echo "task: $(cat "$job_dir/task.txt" 2>/dev/null || echo -)"
+  echo
+  echo "## stdout"
+  cat "$job_dir/stdout.log" 2>/dev/null || true
+  echo
+  echo "## stderr"
+  cat "$job_dir/stderr.log" 2>/dev/null || true
+}
+
+tail_job() {
+  parse_repo_only "$@"
+  local token="${extra_args[0]:-latest}"
+  local job_dir
+  job_dir="$(resolve_job_dir "$repo" "$token")"
+  echo "tailing $(job_id_from_dir "$job_dir")"
+  tail -n 80 -f "$job_dir/stdout.log" "$job_dir/stderr.log"
+}
+
+kill_job() {
+  parse_repo_only "$@"
+  local token="${extra_args[0]:-}"
+  [[ -n "$token" ]] || die "missing job id"
+  local job_dir pid
+  job_dir="$(resolve_job_dir "$repo" "$token")"
+  pid="$(cat "$job_dir/pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || die "job has no pid"
+  kill "$pid"
+  printf '%s\n' "killed" >"$job_dir/status"
+  now_utc >"$job_dir/finished.txt"
+  echo "killed $(job_id_from_dir "$job_dir") pid=$pid"
+}
+
 main() {
   [[ $# -gt 0 ]] || {
     usage
@@ -387,6 +618,30 @@ main() {
     advise)
       shift
       run_pipeline advise "$@"
+      ;;
+    bg)
+      shift
+      bg_run "$@"
+      ;;
+    ps)
+      shift
+      ps_jobs "$@"
+      ;;
+    logs)
+      shift
+      logs_job "$@"
+      ;;
+    tail)
+      shift
+      tail_job "$@"
+      ;;
+    kill)
+      shift
+      kill_job "$@"
+      ;;
+    tools)
+      shift
+      tools "$@"
       ;;
     status)
       shift

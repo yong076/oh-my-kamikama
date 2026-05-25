@@ -1,7 +1,7 @@
 {
   "name": "oh-my-kamikama",
-  "version": "0.1.0",
-  "description": "One command that makes Claude, Gemini, and Codex work together.",
+  "version": "0.2.0",
+  "description": "One command. Many agents. A local conductor for Claude, Gemini, Codex, OMX, OMO, and cmux-aware vibe coding.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {
@@ -9,6 +9,7 @@
   },
   "files": [
     "bin",
+    "assets",
     "docs",
     "scripts",
     "README.md",
@@ -18,7 +19,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "bash -n bin/omk && ./bin/omk doctor"
+    "test": "bash -n bin/omk && bash -n scripts/quant-smoke.sh && ./bin/omk doctor && ./bin/omk tools >/dev/null"
   },
   "keywords": [
     "ai",
