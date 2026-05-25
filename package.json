@@ -1,6 +1,6 @@
 {
   "name": "oh-my-kamikama",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One command. Many agents. A local conductor for Claude, Gemini, Codex, OMX, OMO, and cmux-aware vibe coding.",
   "license": "MIT",
   "type": "commonjs",
@@ -12,6 +12,7 @@
     "assets",
     "docs",
     "scripts",
+    "tests",
     "README.md",
     "LICENSE"
   ],
@@ -19,7 +20,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "bash -n bin/omk && bash -n scripts/quant-smoke.sh && ./bin/omk doctor && ./bin/omk tools >/dev/null"
+    "test": "bash -n bin/omk && bash -n scripts/quant-smoke.sh && bash tests/test-offline-pipeline.sh && bash tests/test-cockpit-generation.sh"
   },
   "keywords": [
     "ai",

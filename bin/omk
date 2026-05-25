@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 usage() {
   cat <<'EOF'
@@ -10,6 +10,8 @@ Usage:
   omk run [--repo PATH] "task"
   omk advise [--repo PATH] "task"
   omk bg [--repo PATH] "task"
+  omk cockpit [--repo PATH] "task"
+  omk watch [--repo PATH] [job-id|latest]
   omk ps [--repo PATH]
   omk logs [--repo PATH] [job-id|latest]
   omk tail [--repo PATH] [job-id|latest]
@@ -112,6 +114,7 @@ tools() {
   echo "omk advise  cheap-ish interrogation before code"
   echo "omk run     full Claude + Gemini + Codex pipeline"
   echo "omk bg      same pipeline in the background with logs and status"
+  echo "omk cockpit cmux workspace with status + runner panes"
 }
 
 doctor() {
@@ -183,6 +186,14 @@ parse_repo_and_task() {
   [[ $# -gt 0 ]] || die "missing task"
   task="$*"
   repo="$(cd "$repo" && pwd)"
+}
+
+quote_shell() {
+  printf '%q' "$1"
+}
+
+json_escape() {
+  awk 'BEGIN { ORS = "" } { gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); print }' <<<"$1"
 }
 
 prepare_run_dir() {
@@ -444,6 +455,11 @@ bg_root_for_repo() {
   echo "$repo_path/.omk/bg"
 }
 
+cockpit_root_for_repo() {
+  local repo_path="$1"
+  echo "$repo_path/.omk/cockpits"
+}
+
 resolve_job_dir() {
   local repo_path="$1"
   local token="${2:-latest}"
@@ -453,7 +469,10 @@ resolve_job_dir() {
   [[ -d "$root" ]] || die "no background jobs in $root"
 
   if [[ "$token" == "latest" ]]; then
-    find "$root" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1
+    local latest
+    latest="$(find "$root" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+    [[ -n "$latest" ]] || die "no background jobs in $root"
+    echo "$latest"
     return 0
   fi
 
@@ -562,6 +581,115 @@ ps_jobs() {
   done
 }
 
+watch_jobs() {
+  parse_repo_only "$@"
+  local token="${extra_args[0]:-latest}"
+  local interval="${OMK_WATCH_INTERVAL:-2}"
+
+  while true; do
+    clear 2>/dev/null || true
+    echo "oh-my-kamikama watch"
+    echo "===================="
+    echo "repo: $repo"
+    echo "time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo
+
+    ps_jobs --repo "$repo" || true
+    echo
+
+    local job_dir=""
+    if job_dir="$(resolve_job_dir "$repo" "$token" 2>/dev/null)"; then
+      echo "# $(job_id_from_dir "$job_dir")"
+      echo "status: $(cat "$job_dir/status" 2>/dev/null || echo unknown)"
+      echo "pid: $(cat "$job_dir/pid" 2>/dev/null || echo -)"
+      if [[ -s "$job_dir/run_dir.txt" ]]; then
+        echo "run artifacts: $(cat "$job_dir/run_dir.txt")"
+      fi
+      echo
+      echo "## stdout tail"
+      if [[ -f "$job_dir/stdout.log" ]]; then
+        tail -n 34 "$job_dir/stdout.log"
+      else
+        echo "(no stdout yet)"
+      fi
+      echo
+      echo "## stderr tail"
+      if [[ -f "$job_dir/stderr.log" ]]; then
+        tail -n 18 "$job_dir/stderr.log"
+      else
+        echo "(no stderr yet)"
+      fi
+    else
+      echo "no selected job yet: $token"
+      echo "start one with: omk bg --repo $(quote_shell "$repo") \"task\""
+    fi
+
+    sleep "$interval"
+  done
+}
+
+cockpit_launch() {
+  parse_repo_and_task "$@"
+  require_cmd cmux
+
+  local root title slug cockpit_dir watch_script control_script
+  root="$(cockpit_root_for_repo "$repo")"
+  slug="$(slugify "$task")"
+  [[ -n "$slug" ]] || slug="task"
+  title="omk-${slug:0:34}"
+  cockpit_dir="$root/$(now_utc)-$slug"
+  watch_script="$cockpit_dir/watch.sh"
+  control_script="$cockpit_dir/control.sh"
+
+  mkdir -p "$cockpit_dir"
+  printf '%s\n' "$repo" >"$cockpit_dir/repo.txt"
+  printf '%s\n' "$task" >"$cockpit_dir/task.txt"
+
+  local repo_q cockpit_dir_q
+  repo_q="$(quote_shell "$repo")"
+  cockpit_dir_q="$(quote_shell "$cockpit_dir")"
+
+  cat >"$watch_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $repo_q
+omk watch --repo $repo_q latest
+EOF
+
+  cat >"$control_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $repo_q
+echo "OH MY KAMISAMA"
+echo "=============="
+echo
+cat $cockpit_dir_q/task.txt
+echo
+omk bg --repo $repo_q "\$(cat $cockpit_dir_q/task.txt)" | tee $cockpit_dir_q/bg-start.txt
+sleep 1
+omk tail --repo $repo_q latest
+EOF
+
+  chmod +x "$watch_script" "$control_script"
+
+  local watch_cmd control_cmd layout output
+  watch_cmd="bash $(quote_shell "$watch_script")"
+  control_cmd="bash $(quote_shell "$control_script")"
+  layout='{"direction":"horizontal","split":0.43,"children":[{"pane":{"surfaces":[{"type":"terminal","command":"'"$(json_escape "$watch_cmd")"'"}]}},{"pane":{"surfaces":[{"type":"terminal","command":"'"$(json_escape "$control_cmd")"'"}]}}]}'
+
+  output="$(cmux new-workspace \
+    --name "$title" \
+    --description "Oh My Kamisama cockpit" \
+    --cwd "$repo" \
+    --layout "$layout" \
+    --focus true)"
+
+  echo "$output"
+  echo "omk cockpit: $cockpit_dir"
+  echo "watch: $watch_script"
+  echo "control: $control_script"
+}
+
 logs_job() {
   parse_repo_only "$@"
   local token="${extra_args[0]:-latest}"
@@ -587,6 +715,7 @@ tail_job() {
   local job_dir
   job_dir="$(resolve_job_dir "$repo" "$token")"
   echo "tailing $(job_id_from_dir "$job_dir")"
+  touch "$job_dir/stdout.log" "$job_dir/stderr.log"
   tail -n 80 -f "$job_dir/stdout.log" "$job_dir/stderr.log"
 }
 
@@ -622,6 +751,14 @@ main() {
     bg)
       shift
       bg_run "$@"
+      ;;
+    cockpit|cmux)
+      shift
+      cockpit_launch "$@"
+      ;;
+    watch)
+      shift
+      watch_jobs "$@"
       ;;
     ps)
       shift

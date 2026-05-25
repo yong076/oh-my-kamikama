@@ -86,6 +86,8 @@ omk run "ship the narrow change"
 omk advise "review the implementation plan"
 omk run --repo /path/to/repo "fix the parser regression"
 omk bg --repo /path/to/repo "run the full conductor in the background"
+omk cockpit --repo /path/to/repo "open a cmux control room and run it"
+omk watch --repo /path/to/repo latest
 omk ps --repo /path/to/repo
 omk logs --repo /path/to/repo latest
 omk tail --repo /path/to/repo latest
@@ -148,6 +150,21 @@ Background jobs are written to:
   stderr.log
   run_dir.txt
 ```
+
+## Cockpit Mode
+
+`omk cockpit` opens a cmux workspace with two panes:
+
+- left: `omk watch`, refreshing job status plus stdout/stderr tails
+- right: `omk bg`, then `omk tail` for the launched conductor run
+
+```bash
+omk cockpit --repo /path/to/repo "make the agents chew through this"
+```
+
+This is the first step toward the bigger control room: one visible place for
+Claude, Gemini, Codex, OMX/OMO/opencode lanes, background jobs, artifacts, and
+eventually review/QA gates.
 
 ## Shirt Mode
 

@@ -65,7 +65,8 @@ Practical translation:
 
 - `omk bg` starts long runs without blocking the terminal.
 - `omk ps`, `omk logs`, `omk tail`, and `omk kill` make those runs inspectable.
-- Future cmux integration should create native panes and status badges.
+- `omk cockpit` creates a cmux workspace with status/watch and runner panes.
+- Future cmux integration should add native status badges and lane-specific panes.
 
 ## Roadmap
 
@@ -76,20 +77,26 @@ Practical translation:
 - Witty original README assets.
 - Strategy document and public smoke tests.
 
-### v0.3: Deep wish interrogation
+### v0.3: cmux cockpit
+
+- `omk cockpit` opens a cmux workspace for visible background execution.
+- `omk watch` refreshes job status and stdout/stderr tails.
+- Offline fake-CLI tests cover the conductor and cockpit generator without model calls.
+
+### v0.4: Deep wish interrogation
 
 - `omk plan` creates `.omk/plans/<run>/` with requirements, risks, gates, and
   open questions.
 - Pattern pack detection inspired by divecode.
 - `omk run` can pause when a high-risk unanswered question is found.
 
-### v0.4: Goal and team adapters
+### v0.5: Goal and team adapters
 
 - `omk goal` wraps `omx ultragoal` when installed.
 - `omk team` wraps `omx team` or cmux panes for large work.
 - `omk --with-opencode` adds opencode as scout/reviewer.
 
-### v0.5: Dashboard mode
+### v0.6: Dashboard mode
 
 - Terminal status UI with active lanes, durations, exit codes, and artifact
   links.
