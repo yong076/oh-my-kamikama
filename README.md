@@ -237,17 +237,22 @@ omk cockpit --repo ~/work/app "ship the feature with tests and notes"
 
 ## Interactive shell
 
-With no arguments in an interactive terminal, `omk` opens a small REPL with a live agent status header:
+With no arguments in an interactive terminal, `omk` opens a small REPL with a Claude-Code-style launch screen and live agent status:
 
 ```text
-🐱  Oh My Kamisama v0.8.0
-repo:  ~/work/app
-mode:  auto
-route: claude
-------------------------------------------------------------------------
-agents: Codex 70% 7d ok | Claude 92% 7d ok | Gemini 94% Gemini Pro ok
-activity: walking
-------------------------------------------------------------------------
+╭ Oh My Kamisama v0.8.0 ────────────────────────────────────────────────╮
+│ repo:  ~/work/app                                                      │
+│ mode:  auto                                                            │
+│ route: claude                                                          │
+│ state: walking                                                         │
+├───────────────────────────────────────────────────────────────────────┤
+│ agents: Codex 70% 7d ok | Claude 92% 7d ok | Gemini 94% daily ok       │
+├───────────────────────────────────────────────────────────────────────┤
+│ try:   describe a task, /mode cockpit, /advise <question>              │
+│ keys:  Enter run  Shift+Enter newline  Ctrl+L redraw                   │
+╰───────────────────────────────────────────────────────────────────────╯
+mode:auto  route:claude  repo:~/work/app  /help /agents /context /exit
+
 type a task, /agents for detail, /context for repo, /exit to quit
 
 🐱
@@ -255,10 +260,16 @@ type a task, /agents for detail, /context for repo, /exit to quit
 
 Plain text is treated as a task and runs in the current mode. Slash commands control the shell:
 
-TTY sessions use the Node readline shell (`bin/omk-repl.js`) for normal
-terminal editing: backspace, arrow movement, and command history.
+TTY sessions use the Claude-Code-style terminal editor in `bin/omk-repl.js` for
+normal terminal editing: backspace, arrow movement, multiline input, and command
+history.
 Non-interactive stdin keeps the Bash fallback so tests and scripts remain
 simple.
+
+Multiline prompts work like Claude Code: Shift+Enter or Meta+Enter inserts a
+newline when your terminal sends that key distinctly, and backslash+Enter always
+continues on the next line. Set `OMK_READLINE_REPL=1` to use the simpler
+readline fallback.
 
 | Command | What it does |
 |---|---|
@@ -271,6 +282,7 @@ simple.
 | `/mode cockpit` | Open a cmux cockpit for each task |
 | `/agents` | Refresh status, quota, activity, suggested route |
 | `/refresh` | Redraw the launch screen |
+| `/screen` | Print the compact status panel |
 | `/route` | Print the current auto route |
 | `/connect` | Install/check Agent Cat Connectors |
 | `/context` | Show repo branch, scripts, surfaces, route |
@@ -477,6 +489,8 @@ Behavior is controlled with environment variables. None are required.
 | `OMK_ALLOW_GEMINI_FALLBACK` | unset | When set, auto mode falls back to Gemini **without** asking for interactive confirmation. |
 | `OMK_SKIP_AGENTCAT_INSTALL` | unset | Skip the Agent Cat Connectors installer during `npm install -g`. |
 | `OMK_WATCH_INTERVAL` | `2` | Refresh interval (seconds) for `omk watch`. |
+| `OMK_INPUT_BG` | dark input bar | Set to `none` to disable the colored interactive input row. |
+| `OMK_READLINE_REPL` | unset | Set to `1` to use the simpler readline fallback instead of the Claude-Code-style terminal editor. |
 
 ---
 

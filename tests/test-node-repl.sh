@@ -62,7 +62,10 @@ chmod +x "$fake_bin/agentcat" "$fake_bin/claude" "$fake_bin/codex" "$fake_bin/ge
 {
   printf '/helpp\177\n'
   echo "/route"
+  echo "/screen"
   echo "/mode claude"
+  printf '첫 줄\\\n'
+  echo "둘째 줄"
   echo "Node repl smoke."
   echo "/exit"
 } | PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" OMK_SKIP_AGENTCAT_INSTALL=1 \
@@ -72,6 +75,10 @@ chmod +x "$fake_bin/agentcat" "$fake_bin/claude" "$fake_bin/codex" "$fake_bin/ge
 grep -q "Oh My Kamisama" "$test_root/repl.out"
 grep -q "Slash commands" "$test_root/repl.out"
 grep -q "auto route: claude" "$test_root/repl.out"
+grep -q "activity: walking" "$test_root/repl.out"
 grep -q "NODE-REPL-CLAUDE-OK" "$test_root/repl.out"
+
+grep -R -q "첫 줄" "$work_repo/.omk/runs"
+grep -R -q "둘째 줄" "$work_repo/.omk/runs"
 
 echo "node repl ok"

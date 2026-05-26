@@ -543,6 +543,8 @@ shell_banner() {
   rule_line "-"
   agentcat_status_compact
   rule_line "-"
+  echo "try:   describe a task, /mode cockpit, /advise <question>"
+  echo "keys:  Enter run, /screen status panel, /exit quit"
   echo "type a task, /agents for detail, /context for repo, /exit to quit"
 }
 
@@ -1520,6 +1522,7 @@ Slash commands:
                         advise, bg, cockpit, cmux
   /agents               Refresh agent status, usage, and auto route
   /refresh              Redraw the launch screen
+  /screen               Show the compact status panel
   /route                Show the current auto route
   /connect              Install/check Agent Cat Connectors
   /context              Show repo branch, scripts, surfaces, and route
@@ -1545,6 +1548,11 @@ Slash commands:
   /doctor               Check required and optional CLIs
   /! COMMAND            Run a shell command in the current repo
   /clear                Clear the screen
+
+Multiline input:
+  In the Node TTY shell, Shift+Enter or Meta+Enter inserts a newline when
+  your terminal sends it. Backslash+Enter always continues on the next line.
+  Set OMK_READLINE_REPL=1 to use the simpler readline fallback.
 
 Examples:
   fix the failing auth test and verify it
@@ -1684,7 +1692,7 @@ interactive_shell() {
           ensure_agentcat_connectors || true
           agentcat_status_table
           ;;
-        /refresh|/home)
+        /refresh|/home|/screen|/statusline)
           clear 2>/dev/null || true
           shell_banner "$shell_repo" "$shell_mode"
           ;;

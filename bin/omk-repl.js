@@ -9,6 +9,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const root = path.resolve(__dirname, "..");
 const omk = path.join(__dirname, "omk");
+const useAnsi = process.stdout.isTTY && process.env.NO_COLOR !== "1" && process.env.OMK_ASCII !== "1";
 
 function argValue(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -23,7 +24,25 @@ let mode = argValue("--mode", process.env.OMK_SHELL_MODE || "auto");
 const validModes = new Set(["auto", "run", "claude", "gemini", "advise", "bg", "cockpit", "cmux"]);
 if (!validModes.has(mode)) mode = "auto";
 const promptText = process.env.OMK_ASCII === "1" ? "> " : "🐱 ";
+const continuationPromptText = process.env.OMK_ASCII === "1" ? "| " : "│ ";
 let rawModeWanted = false;
+
+const theme = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  bold: "\x1b[1m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  magenta: "\x1b[35m",
+  yellow: "\x1b[33m",
+  inputBg: "\x1b[48;5;236m",
+  inputFg: "\x1b[38;5;252m",
+};
+
+function color(name, value) {
+  if (!useAnsi) return value;
+  return `${theme[name] || ""}${value}${theme.reset}`;
+}
 
 function setRawMode(enabled) {
   rawModeWanted = enabled;
@@ -77,6 +96,11 @@ function shortPath(value) {
   return value;
 }
 
+function terminalWidth() {
+  const width = process.stdout.columns || 80;
+  return Math.max(56, Math.min(width, 100));
+}
+
 function version() {
   const result = runCapture(["--version"]);
   return result.stdout.trim() || "dev";
@@ -101,24 +125,113 @@ function agentSnapshot() {
   };
 }
 
+function stripAnsi(value) {
+  return String(value).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function cell(value, width) {
+  const text = String(value);
+  const plainWidth = displayWidth(stripAnsi(text));
+  if (plainWidth <= width) return text + " ".repeat(width - plainWidth);
+  const chars = Array.from(stripAnsi(text));
+  let out = "";
+  let used = 0;
+  for (const ch of chars) {
+    const next = charWidth(ch);
+    if (used + next > width - 1) break;
+    out += ch;
+    used += next;
+  }
+  return out + "…".repeat(width > 0 ? 1 : 0) + " ".repeat(Math.max(0, width - used - 1));
+}
+
+function inputRowStyle(value) {
+  if (!useAnsi || process.env.OMK_INPUT_BG === "none") return value;
+  return `${theme.inputBg}${theme.inputFg}${value}${theme.reset}`;
+}
+
+function padInputRow(value, columns) {
+  const width = displayWidth(stripAnsi(value));
+  return value + " ".repeat(Math.max(0, columns - width));
+}
+
+function framedLine(left, middle, right, fill = "─") {
+  const width = terminalWidth();
+  const textWidth = displayWidth(stripAnsi(middle));
+  const fillWidth = Math.max(0, width - displayWidth(left) - displayWidth(right) - textWidth);
+  return left + middle + fill.repeat(fillWidth) + right;
+}
+
+function frameRow(label, value) {
+  const width = terminalWidth();
+  const inner = width - 4;
+  const lines = String(value).split(/\r?\n/);
+  const continuationLabel = " ".repeat(displayWidth(label));
+  for (const [index, line] of lines.entries()) {
+    const currentLabel = index === 0 ? label : continuationLabel;
+    console.log(`│ ${cell(`${currentLabel}${line}`, inner)} │`);
+  }
+}
+
 function rule() {
-  const width = Math.min(process.stdout.columns || 80, 96);
-  console.log("-".repeat(Math.max(50, width)));
+  console.log(framedLine("├", "", "┤"));
+}
+
+function statusLine(agents) {
+  const parts = [
+    color("magenta", `mode:${mode}`),
+    color("cyan", `route:${agents.route}`),
+    `repo:${shortPath(repo)}`,
+    color("dim", "/help /agents /context /exit"),
+  ];
+  console.log(color("dim", parts.join("  ")));
 }
 
 function banner() {
   const agents = agentSnapshot();
   console.clear();
-  console.log(`🐱  Oh My Kamisama v${version()}`);
-  console.log(`repo:  ${shortPath(repo)}`);
+  const title = ` ${color("bold", "Oh My Kamisama")} ${color("dim", `v${version()}`)} `;
+  console.log(framedLine("╭", title, "╮"));
+  frameRow("repo:  ", shortPath(repo));
+  frameRow("mode:  ", mode);
+  frameRow("route: ", agents.route);
+  frameRow("state: ", agents.activity);
+  rule();
+  frameRow("agents: ", agents.providers);
+  rule();
+  frameRow("try:   ", "describe a task, /mode cockpit, /advise <question>");
+  frameRow("keys:  ", "Enter run  Shift+Enter newline  Ctrl+L redraw");
+  console.log(framedLine("╰", "", "╯"));
+  statusLine(agents);
+  console.log("");
+  console.log("type a task, /agents for detail, /context for repo, /exit to quit");
+  console.log("");
+}
+
+function printTaskHeader(taskMode, task) {
+  console.log("");
+  console.log(framedLine("╭", ` ${color("bold", taskMode)} `, "╮"));
+  frameRow("repo: ", shortPath(repo));
+  frameRow("task: ", task);
+  console.log(framedLine("╰", "", "╯"));
+}
+
+function printTaskFooter(taskMode, code) {
+  const agents = agentSnapshot();
+  const label = code === 0 ? color("green", "done") : color("yellow", `exit ${code}`);
+  console.log("");
+  console.log(`${label} ${color("dim", taskMode)}  ${color("dim", `mode:${mode} route:${agents.route}`)}`);
+  statusLine(agents);
+  console.log("");
+}
+
+function printCompactStatus() {
+  const agents = agentSnapshot();
   console.log(`mode:  ${mode}`);
   console.log(`route: ${agents.route}`);
-  rule();
   console.log(`agents: ${agents.providers}`);
   console.log(`activity: ${agents.activity}`);
   rule();
-  console.log("type a task, /agents for detail, /context for repo, /exit to quit");
-  console.log("");
 }
 
 function printHelp() {
@@ -134,6 +247,7 @@ Slash commands:
   /agents               Refresh detailed agent status
   /refresh              Redraw the launch screen
   /clear                Clear/redraw the launch screen
+  /screen               Show the compact Claude-Code-style status panel
   /route                Show the current auto route
   /connect              Install/check Agent Cat Connectors
   /context              Show repo branch, scripts, surfaces, and route
@@ -158,6 +272,8 @@ Slash commands:
   /status               Show omk and provider versions
   /doctor               Check required and optional CLIs
   /! COMMAND            Run a shell command in the current repo`);
+  console.log("");
+  console.log("Multiline input: Shift+Enter or Meta+Enter inserts a newline when your terminal sends it; backslash+Enter always continues on the next line.");
 }
 
 function splitCommand(line) {
@@ -183,7 +299,9 @@ async function runTask(taskMode, task) {
     console.error(`usage: /${taskMode} TASK`);
     return;
   }
-  await runInherit([taskMode, "--repo", repo, task]);
+  printTaskHeader(taskMode, task);
+  const code = await runInherit([taskMode, "--repo", repo, task]);
+  printTaskFooter(taskMode, code);
 }
 
 async function handleSlash(line) {
@@ -232,6 +350,10 @@ async function handleSlash(line) {
       console.log(`auto route: ${agents.route}`);
       return true;
     }
+    case "/screen":
+    case "/statusline":
+      printCompactStatus();
+      return true;
     case "/connect":
       await runInherit(["connect"]);
       return true;
@@ -353,7 +475,7 @@ function displayWidth(value) {
 }
 
 async function processLine(raw) {
-  const line = normalizeBackspaces(raw).trim();
+  const line = normalizeBackspaces(String(raw).replace(/\r\n?/g, "\n")).trim();
   if (!line) return true;
   if (line.startsWith("/")) {
     return handleSlash(line);
@@ -363,6 +485,9 @@ async function processLine(raw) {
 }
 
 async function readlineLoop() {
+  const multiline = process.env.OMK_MULTILINE !== "0";
+  const pendingLines = [];
+  let insertMultilineBreak = () => {};
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -370,20 +495,132 @@ async function readlineLoop() {
     historySize: 200,
     removeHistoryDuplicates: true,
   });
-  const promptIfOpen = () => {
-    if (!rl.closed) rl.prompt();
+  const promptIfOpen = (preserveCursor = false) => {
+    if (!rl.closed) rl.prompt(preserveCursor);
   };
 
-  promptIfOpen();
-  for await (const raw of rl) {
-    const keepGoing = await processLine(raw);
-    if (!keepGoing) break;
-    promptIfOpen();
+  const insertReadlineText = (text) => {
+    rl.line = rl.line.slice(0, rl.cursor) + text + rl.line.slice(rl.cursor);
+    rl.cursor += text.length;
+    if (typeof rl._refreshLine === "function") {
+      rl._refreshLine();
+    } else {
+      promptIfOpen(true);
+    }
+  };
+  insertMultilineBreak = () => {
+    if (!rl.closed) {
+      rl.cursor = rl.line.length;
+      insertReadlineText("\n");
+    }
+  };
+
+  const continueWithLine = (line) => {
+    pendingLines.push(line);
+    rl.setPrompt(continuationPromptText);
+  };
+
+  const resetPrompt = () => {
+    pendingLines.length = 0;
+    rl.setPrompt(promptText);
+  };
+
+  let ctrlLHandler = null;
+  if (process.stdin.isTTY) {
+    readline.emitKeypressEvents(process.stdin);
+    ctrlLHandler = (_str, key) => {
+      if (key && key.ctrl && key.name === "l") {
+        banner();
+        promptIfOpen(true);
+      }
+      if (!key || !multiline) return;
+      const isEnter = key.name === "return" || key.name === "enter";
+      const isModifiedEnter = isEnter && (key.shift || key.meta);
+      if (isModifiedEnter) {
+        insertMultilineBreak();
+      }
+    };
+    process.stdin.on("keypress", ctrlLHandler);
   }
-  if (!rl.closed) rl.close();
+
+  promptIfOpen();
+  try {
+    for await (const raw of rl) {
+      let input = raw;
+      if (multiline && input.endsWith("\\")) {
+        continueWithLine(input.slice(0, -1));
+        promptIfOpen();
+        continue;
+      }
+      if (pendingLines.length) {
+        input = [...pendingLines, input].join("\n");
+        resetPrompt();
+      }
+      const keepGoing = await processLine(input);
+      if (!keepGoing) break;
+      promptIfOpen();
+    }
+  } finally {
+    if (ctrlLHandler) process.stdin.off("keypress", ctrlLHandler);
+    if (!rl.closed) rl.close();
+  }
 }
 
-async function rawLoop() {
+function buildInputRows(chars, cursor) {
+  const columns = Math.max(20, process.stdout.columns || 80);
+  const prompt = promptText;
+  const continuation = continuationPromptText;
+  const wrapPrompt = " ".repeat(displayWidth(continuation));
+  const rows = [];
+  let row = prompt;
+  let rowWidth = displayWidth(prompt);
+  let prefixWidth = displayWidth(prompt);
+  let cursorRow = 0;
+  let cursorCol = rowWidth;
+
+  const pushRow = () => {
+    rows.push(row);
+  };
+  const newRow = (prefix) => {
+    row = prefix;
+    rowWidth = displayWidth(prefix);
+    prefixWidth = rowWidth;
+  };
+  const markCursor = () => {
+    cursorRow = rows.length;
+    cursorCol = rowWidth;
+  };
+
+  if (cursor === 0) markCursor();
+  for (let index = 0; index < chars.length; index += 1) {
+    const ch = chars[index];
+    if (ch === "\n") {
+      pushRow();
+      newRow(continuation);
+      if (cursor === index + 1) markCursor();
+      continue;
+    }
+
+    const width = charWidth(ch);
+    if (rowWidth + width > columns && rowWidth > prefixWidth) {
+      pushRow();
+      newRow(wrapPrompt);
+    }
+
+    row += ch;
+    rowWidth += width;
+    if (cursor === index + 1) markCursor();
+  }
+  pushRow();
+  const styledRows = rows.map((value) => inputRowStyle(padInputRow(value, columns)));
+  return {
+    rows: styledRows,
+    cursorRow,
+    cursorCol,
+  };
+}
+
+async function terminalInputLoop() {
   readline.emitKeypressEvents(process.stdin);
 
   let chars = [];
@@ -392,12 +629,25 @@ async function rawLoop() {
   let historyIndex = 0;
   let running = false;
   let done = false;
+  let renderedRows = 0;
+  let renderedCursorRow = 0;
 
   const render = () => {
-    process.stdout.write("\r\x1b[2K");
-    process.stdout.write(promptText + chars.join(""));
-    const suffixWidth = displayWidth(chars.slice(cursor).join(""));
-    if (suffixWidth > 0) process.stdout.write(`\x1b[${suffixWidth}D`);
+    if (renderedRows > 0) {
+      process.stdout.write("\r");
+      if (renderedCursorRow > 0) process.stdout.write(`\x1b[${renderedCursorRow}A`);
+      process.stdout.write("\x1b[J");
+    }
+
+    const view = buildInputRows(chars, cursor);
+    process.stdout.write(view.rows.join("\n"));
+    renderedRows = view.rows.length;
+    renderedCursorRow = view.cursorRow;
+
+    const rowsBelowCursor = renderedRows - view.cursorRow - 1;
+    process.stdout.write("\r");
+    if (rowsBelowCursor > 0) process.stdout.write(`\x1b[${rowsBelowCursor}A`);
+    if (view.cursorCol > 0) process.stdout.write(`\x1b[${view.cursorCol}C`);
   };
 
   const setLine = (value) => {
@@ -409,7 +659,12 @@ async function rawLoop() {
     if (running) return;
     running = true;
     const raw = chars.join("");
+    process.stdout.write("\r");
+    const rowsBelowCursor = renderedRows - renderedCursorRow - 1;
+    if (rowsBelowCursor > 0) process.stdout.write(`\x1b[${rowsBelowCursor}B`);
     process.stdout.write("\n");
+    renderedRows = 0;
+    renderedCursorRow = 0;
     setLine("");
     historyIndex = history.length;
     const normalized = normalizeBackspaces(raw).trim();
@@ -433,12 +688,24 @@ async function rawLoop() {
     if (!done) render();
   };
 
+  const insertText = (value) => {
+    const inputChars = Array.from(value);
+    if (!inputChars.length) return;
+    chars.splice(cursor, 0, ...inputChars);
+    cursor += inputChars.length;
+    render();
+  };
+
+  const insertNewline = () => {
+    insertText("\n");
+  };
+
   setRawMode(true);
   process.stdin.resume();
   render();
 
   return new Promise((resolve) => {
-    process.stdin.on("keypress", (str, key = {}) => {
+    const onKeypress = (str, key = {}) => {
       if (done || running) return;
 
       if (key.ctrl && key.name === "c") {
@@ -490,14 +757,34 @@ async function rawLoop() {
       }
 
       if (key.ctrl && key.name === "l") {
+        renderedRows = 0;
+        renderedCursorRow = 0;
         banner();
         render();
         return;
       }
 
+      const sequence = key.sequence || str || "";
+      if (sequence === "\x1b[13;2u" || sequence === "\x1b[13;2~" || sequence === "\x1b\r" || sequence === "\x1b\n") {
+        insertNewline();
+        return;
+      }
+
       if (key.name === "return" || key.name === "enter" || str === "\r" || str === "\n") {
+        if (chars[cursor - 1] === "\\") {
+          chars.splice(cursor - 1, 1, "\n");
+          render();
+          return;
+        }
+        if (key.shift || key.meta) {
+          insertNewline();
+          return;
+        }
         submit().then(() => {
-          if (done) resolve();
+          if (done) {
+            process.stdin.off("keypress", onKeypress);
+            resolve();
+          }
         });
         return;
       }
@@ -559,19 +846,19 @@ async function rawLoop() {
       if (str && !key.ctrl && !key.meta) {
         const inputChars = Array.from(str).filter((ch) => ch >= " " && ch !== "\x7f");
         if (inputChars.length) {
-          chars.splice(cursor, 0, ...inputChars);
-          cursor += inputChars.length;
-          render();
+          insertText(inputChars.join(""));
         }
       }
-    });
+    };
+    process.stdin.on("keypress", onKeypress);
   });
 }
 
 async function main() {
   banner();
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    await rawLoop();
+  const wantReadline = process.env.OMK_READLINE_REPL === "1";
+  if (!wantReadline && process.stdin.isTTY && process.stdout.isTTY) {
+    await terminalInputLoop();
   } else {
     await readlineLoop();
   }
