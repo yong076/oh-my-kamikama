@@ -509,7 +509,7 @@ shell_prompt_glyph() {
   if [[ "${OMK_ASCII:-0}" == "1" ]]; then
     echo ">"
   else
-    echo "❯"
+    echo "🐱"
   fi
 }
 
@@ -520,14 +520,14 @@ shell_banner() {
   route="$(agentcat_route_choice 2>/dev/null || echo unknown)"
   repo_short="$(short_path "$shell_repo")"
 
-  echo "Tip: type a task, /agents for detail, /context for repo, /exit to quit"
-  echo "           Oh My Kamisama v$VERSION"
-  echo "   OMK     mode $shell_mode | route $route"
-  echo "  /|||\\    $repo_short"
-  echo "   |||"
+  echo "🐱  Oh My Kamisama v$VERSION"
+  echo "repo:  $repo_short"
+  echo "mode:  $shell_mode"
+  echo "route: $route"
   rule_line "-"
   agentcat_status_compact
   rule_line "-"
+  echo "type a task, /agents for detail, /context for repo, /exit to quit"
 }
 
 agentcat_route_choice() {

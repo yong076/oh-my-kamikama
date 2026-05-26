@@ -357,16 +357,17 @@ omk doctor
 With no arguments in an interactive terminal, `omk` opens a small prompt:
 
 ```text
-Tip: type a task, /agents for detail, /context for repo, /exit to quit
-           Oh My Kamisama v0.7.0
-   OMK     mode auto | route claude
-  /|||\    ~/work/app
-   |||
+🐱  Oh My Kamisama v0.7.0
+repo:  ~/work/app
+mode:  auto
+route: claude
 ------------------------------------------------------------------------
 agents: Codex 70% 7d ok | Claude 92% 7d ok | Gemini 94% Gemini Pro ok
 route: claude | activity: walking
 ------------------------------------------------------------------------
-❯
+type a task, /agents for detail, /context for repo, /exit to quit
+
+🐱
 ```
 
 Plain text is treated as a task and runs in the current mode. Slash commands
