@@ -18,6 +18,10 @@
 </p>
 
 <p align="center">
+  <b>English</b> · <a href="README.ko.md">한국어</a>
+</p>
+
+<p align="center">
   <code>omk</code> asks Claude and Gemini to argue about your task, then makes Codex implement it.<br/>
   Every run leaves <b>artifacts on disk</b> instead of one giant disappearing chat.
 </p>
