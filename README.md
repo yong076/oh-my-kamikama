@@ -6,10 +6,10 @@
 
 One command. Many agents. A suspicious amount of confidence.
 
-`omk` is a local multi-CLI conductor for extreme vibe coding. Claude and Gemini
-produce independent advisory passes, then Codex executes with both artifacts as
-context. Optional adapters discover `opencode`, `omx`, and `cmux` so bigger runs
-can grow into goals, teams, panes, and dashboards.
+`omk` is a local multi-CLI conductor for extreme vibe coding. You give it one
+task. It asks multiple native coding agents to think about the task from
+different angles, records their outputs as artifacts, then hands the final
+execution to Codex with that context.
 
 ```bash
 omk "fix the failing auth test and verify it"
@@ -17,52 +17,134 @@ omk "fix the failing auth test and verify it"
 
 Oh my god? No. Oh my Kamisama.
 
-## Why
+## What It Is
 
-Most AI coding helpers optimize one runtime:
+`oh-my-kamikama` is a command layer above the AI coding CLIs you already use.
+It does not replace Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, or
+cmux. It coordinates them.
+
+The current core pipeline is:
+
+```text
+User task
+  -> Claude advisor  -> writes claude.md
+  -> Gemini advisor  -> writes gemini.md
+  -> Codex executor  -> reads both artifacts, implements, verifies, summarizes
+```
+
+For longer work, `omk` can also run in the background and open a cmux cockpit:
+
+```text
+omk cockpit
+  -> cmux workspace
+     -> left pane:  omk watch
+     -> right pane: omk bg + omk tail
+```
+
+The goal is a practical agent control room: one command starts the work, one
+place shows what is running, and every lane leaves files you can inspect later.
+
+## Why This Exists
+
+Most AI coding tools optimize for one runtime:
 
 - Codex layers focus on Codex workflows, hooks, skills, and teams.
-- Claude layers focus on Claude Code orchestration and guardrails.
-- Multi-model MCPs expose many models to another client.
-- Terminal dashboards focus on watching sessions that already exist.
+- Claude layers focus on Claude Code sessions, permissions, and planning.
+- Gemini is useful as an independent second read.
+- opencode/OMO can add another model lane and terminal-native workflows.
+- OMX adds durable goals, teams, hooks, and HUD-like runtime support.
+- cmux makes long-running panes visible and controllable.
 
-`omk` takes a simpler path: keep the native CLIs installed on your machine and
-make them work together from one command.
+`omk` takes the boring but useful path: keep the native tools installed and make
+them cooperate from one command.
 
-This is not a token-saving tool. The point is to spend enough agent attention to
-turn a vague wish into a better result.
+This is intentionally not a token-saving tool. The point is to spend more agent
+attention when the job is ambiguous, risky, or large enough that one model's
+first answer is not enough.
+
+## What You Get
+
+`omk` is useful when you want:
+
+- A second and third opinion before code changes happen.
+- A final executor that sees advisory context but still owns the implementation.
+- Durable run artifacts under `.omk/` instead of one giant disappearing chat.
+- Background jobs you can inspect with `omk ps`, `omk logs`, and `omk tail`.
+- A cmux workspace that shows status and logs while the agents run.
+- A future path to plug in OMX goals, OMO/opencode scout lanes, and richer QA.
+
+It is especially good for:
+
+- "I know what I want, but the implementation path is fuzzy."
+- "This can burn tokens, just make the result better."
+- "I want Claude/Gemini/Codex to all touch the problem, but not manually."
+- "I want long agent runs visible in cmux instead of hidden in one terminal."
+
+It is not magic:
+
+- Each CLI still needs its own auth/login.
+- Advisor output is context, not authority.
+- Codex still has to inspect the repo and verify the change.
+- Failing agents are surfaced, not hidden.
 
 ## The Wish Contract
 
-Agents are wish-granting machines. They take vague wishes literally. `omk`
-borrows the divecode genie principle: before the final executor grants the wish,
-the advisors surface missing constraints, risks, gates, and verification.
+Agents are wish-granting machines. They often grant vague wishes literally.
+`omk` borrows the divecode "genie principle": before the executor grants the
+wish, advisors should surface missing constraints, risks, gates, and verification.
 
 ```text
-User wish
-  -> Claude advisor: risks, missing questions, gates
-  -> Gemini advisor: alternate read, failure modes, verification
-  -> Codex executor: build, verify, summarize
+Vague wish:
+  "make auth better"
+
+Advisor work:
+  - What auth flow?
+  - What users are affected?
+  - What should not change?
+  - What tests prove this?
+  - What could break in production?
+
+Executor work:
+  - Read advisor artifacts
+  - Inspect the repo
+  - Make the narrowest useful change
+  - Run focused verification
+  - Summarize what changed and what remains
 ```
 
-AI-DLC gives the larger shape:
+AI-DLC gives the larger lifecycle shape:
 
 ```text
-Inception -> Construction -> Operations
+Inception    -> clarify requirements, constraints, risks
+Construction -> implement with tests and verification
+Operations   -> handoff, logs, deploy notes, follow-up checks
 ```
 
 ## Requirements
 
+Core:
+
 - `claude` CLI authenticated
 - `codex` CLI authenticated
 - `gemini` CLI authenticated
-- optional: `opencode`
-- optional: `omx` / `oh-my-codex`
-- optional: `cmux`
 - macOS, Linux, or WSL with Bash
+- Node.js 20+ if installing as an npm package
 
-`omk` calls the three core native CLIs directly. Optional tools are detected and
-used by future adapter modes.
+Optional:
+
+- `cmux` for cockpit mode
+- `omx` / `oh-my-codex` for future durable goal/team adapters
+- `opencode` for future scout/reviewer lanes
+
+Check your local setup:
+
+```bash
+omk doctor
+omk tools
+```
+
+`omk doctor` checks the command surface. It does not replace each provider's
+own login or billing/auth checks.
 
 ## Install
 
@@ -76,54 +158,103 @@ Or run directly:
 
 ```bash
 ./bin/omk doctor
+./bin/omk "summarize this repo and suggest the first safe improvement"
 ```
 
-## Usage
+## Quick Start
+
+Run the full conductor:
 
 ```bash
-omk "ship the narrow change"
-omk run "ship the narrow change"
-omk advise "review the implementation plan"
-omk run --repo /path/to/repo "fix the parser regression"
-omk bg --repo /path/to/repo "run the full conductor in the background"
-omk cockpit --repo /path/to/repo "open a cmux control room and run it"
-omk watch --repo /path/to/repo latest
+omk "fix the failing parser regression and run the focused tests"
+```
+
+Run against another repository:
+
+```bash
+omk --repo /path/to/repo "add validation for empty import names"
+```
+
+Planning/advice only:
+
+```bash
+omk advise --repo /path/to/repo "review the migration plan before coding"
+```
+
+Run in the background:
+
+```bash
+omk bg --repo /path/to/repo "refactor the settings screen and verify it"
 omk ps --repo /path/to/repo
-omk logs --repo /path/to/repo latest
 omk tail --repo /path/to/repo latest
-omk kill --repo /path/to/repo latest
-omk tools
-omk status
-omk doctor
 ```
 
-Run the quantitative smoke test:
+Open the cmux control room:
 
 ```bash
-scripts/quant-smoke.sh 2
+omk cockpit --repo /path/to/repo "ship the feature with tests and notes"
 ```
 
-It installs the local package globally, runs `omk run` repeatedly, and writes a
-CSV with exit codes, latency, Codex sentinel detection, and artifact counts.
+## How It Works
 
-## Pipeline
+### 1. A run directory is created
 
-1. Claude advisor
-   - Runs with `claude --print`.
-   - Produces `claude.md`.
-   - Surfaces dive questions, risks, and gates.
+Every foreground run creates a timestamped artifact directory:
 
-2. Gemini advisor
-   - Runs with `gemini --prompt`.
-   - Produces `gemini.md`.
-   - Provides an independent second read.
+```text
+.omk/runs/<timestamp>-<task>/
+```
 
-3. Codex executor
-   - Runs with `codex exec`.
-   - Reads both advisor artifacts.
-   - Owns final implementation and verification.
+The original task is stored in `task.txt`, and a summary packet is stored in
+`RUN.md`.
 
-Artifacts are written to:
+### 2. Claude and Gemini advise in parallel
+
+`omk` asks both advisors for the same structured read:
+
+- Recommended approach
+- Dive questions
+- AI-DLC phase and gates
+- Risks
+- Verification
+- What Codex should avoid
+
+The advisors are intentionally read-only. They should not edit files. Their job
+is to widen the problem framing before the executor changes anything.
+
+Today the native calls are intentionally simple:
+
+```text
+claude --print --permission-mode plan "<advisor prompt>"
+gemini --skip-trust --approval-mode plan --prompt "<advisor prompt>"
+codex exec --skip-git-repo-check -C <repo> -s workspace-write "<executor prompt>"
+```
+
+That means provider auth, model selection, local policy, and account limits stay
+with the provider CLIs. `omk` only creates the prompts, runs the commands,
+captures their outputs, and connects the artifacts.
+
+### 3. Advisor outputs become artifacts
+
+The outputs are wrapped into:
+
+```text
+claude.md
+gemini.md
+```
+
+Each file includes the provider name, exit code, stdout, and diagnostics. This
+makes failures debuggable and makes successful advice reusable.
+
+### 4. Codex executes with context
+
+Codex receives a prompt that points at both advisor artifacts. It is told to use
+the advisors as context, not authority. It still needs to inspect the repository,
+preserve unrelated user changes, implement the task, and verify the result.
+
+### 5. Logs and outputs stay on disk
+
+Foreground runs write:
 
 ```text
 .omk/runs/<timestamp>-<task>/
@@ -136,7 +267,7 @@ Artifacts are written to:
   codex.err
 ```
 
-Background jobs are written to:
+Background runs write:
 
 ```text
 .omk/bg/<timestamp>-<task>/
@@ -151,20 +282,201 @@ Background jobs are written to:
   run_dir.txt
 ```
 
-## Cockpit Mode
-
-`omk cockpit` opens a cmux workspace with two panes:
-
-- left: `omk watch`, refreshing job status plus stdout/stderr tails
-- right: `omk bg`, then `omk tail` for the launched conductor run
+## Command Reference
 
 ```bash
-omk cockpit --repo /path/to/repo "make the agents chew through this"
+omk "task"
+omk run [--repo PATH] "task"
+omk advise [--repo PATH] "task"
+omk bg [--repo PATH] "task"
+omk cockpit [--repo PATH] "task"
+omk watch [--repo PATH] [job-id|latest]
+omk ps [--repo PATH]
+omk logs [--repo PATH] [job-id|latest]
+omk tail [--repo PATH] [job-id|latest]
+omk kill [--repo PATH] <job-id|latest>
+omk tools
+omk status
+omk doctor
 ```
 
-This is the first step toward the bigger control room: one visible place for
-Claude, Gemini, Codex, OMX/OMO/opencode lanes, background jobs, artifacts, and
-eventually review/QA gates.
+### `omk run`
+
+Full foreground pipeline. Use it when you want the terminal to block until the
+agents finish.
+
+```bash
+omk run --repo ~/work/app "fix checkout coupon validation and run tests"
+```
+
+### `omk advise`
+
+Advisor-only mode. Use it when you want Claude and Gemini to critique a plan
+before any executor changes files.
+
+```bash
+omk advise --repo ~/work/app "should we move this cache into Redis?"
+```
+
+### `omk bg`
+
+Starts the same pipeline through a background supervisor and writes job state
+under `.omk/bg/`.
+
+```bash
+omk bg --repo ~/work/app "modernize the billing settings page"
+omk ps --repo ~/work/app
+omk logs --repo ~/work/app latest
+```
+
+### `omk cockpit`
+
+Creates a cmux workspace with two panes:
+
+- left pane: `omk watch`, refreshed job status plus stdout/stderr tails
+- right pane: starts `omk bg`, then follows logs with `omk tail`
+
+```bash
+omk cockpit --repo ~/work/app "finish the dashboard filters and verify e2e"
+```
+
+This is the mode to use when the work may take a while and you want a visible
+control room instead of a hidden background process.
+
+### `omk watch`
+
+Shows a lightweight terminal dashboard for background jobs:
+
+```bash
+omk watch --repo ~/work/app latest
+```
+
+Set the refresh interval:
+
+```bash
+OMK_WATCH_INTERVAL=5 omk watch --repo ~/work/app latest
+```
+
+## Examples
+
+### Fix a bug with multiple reads
+
+```bash
+omk --repo ~/work/api "fix the refresh-token race and add a regression test"
+```
+
+What happens:
+
+- Claude lists risks and missing constraints.
+- Gemini provides an independent failure-mode read.
+- Codex implements the fix with both artifacts in context.
+- You get `.omk/runs/...` for review.
+
+### Ask for plan pressure before implementation
+
+```bash
+omk advise --repo ~/work/api "review the safest migration path for user_roles"
+```
+
+Use this when the next step should be a decision, not a code edit.
+
+### Start a long run and come back later
+
+```bash
+omk bg --repo ~/work/site "replace the old theme tokens and verify screenshots"
+omk ps --repo ~/work/site
+omk tail --repo ~/work/site latest
+```
+
+If the job finishes, inspect the final packet:
+
+```bash
+omk logs --repo ~/work/site latest
+```
+
+### Open a cmux cockpit
+
+```bash
+omk cockpit --repo ~/work/product "build the first pass of the admin audit view"
+```
+
+Expected shape:
+
+```text
+cmux workspace
+  left:  watch pane with status, pid, stdout tail, stderr tail
+  right: runner pane that starts the job and follows logs
+```
+
+This is the foundation for the bigger vision: `omk` as a cmux-native agent
+cockpit where Claude, Codex, Gemini, OMX, OMO, opencode, QA, review, and release
+lanes can become visible panes instead of hidden subprocesses.
+
+### Continue even if an advisor fails
+
+By default, `omk run` stops before Codex when Claude or Gemini fails. For
+best-effort work:
+
+```bash
+OMK_KEEP_GOING=1 omk --repo ~/work/app "continue even if one advisor is down"
+```
+
+The failed advisor still gets an artifact with diagnostics.
+
+## Testing
+
+Run the local test suite:
+
+```bash
+npm test
+```
+
+The test suite uses fake `claude`, `gemini`, `codex`, and `cmux` commands for
+offline coverage of the pipeline and cockpit generator. It does not spend model
+tokens.
+
+Run the real quantitative smoke test:
+
+```bash
+scripts/quant-smoke.sh 2
+```
+
+That installs the local package globally, runs `omk run` repeatedly, and writes
+a CSV with:
+
+- run status
+- duration
+- Claude advisor exit code
+- Gemini advisor exit code
+- Codex sentinel detection
+- artifact count
+- run directory
+
+Use the quantitative smoke only when you actually want live model calls.
+
+## Design Principles
+
+- Native CLIs stay native. `omk` coordinates; it does not impersonate providers.
+- Artifacts beat memory. Every run should leave inspectable files.
+- Advisors widen context. Executors still own final judgment.
+- Visibility matters. Long-running work should be watchable.
+- Failures are data. A failed lane should produce diagnostics, not disappear.
+- Token thrift is not the north star. Better outcomes are.
+
+## Current Positioning
+
+`oh-my-kamikama` sits above the local tools:
+
+```text
+Claude + Gemini -> independent advice
+Codex           -> final executor
+opencode        -> optional future scout/reviewer lane
+OMX             -> optional future goals/team/HUD lane
+cmux            -> visible pane/runtime lane
+omk             -> run packet, artifacts, and routing
+```
+
+See [docs/strategy.md](docs/strategy.md) for the roadmap.
 
 ## Shirt Mode
 
@@ -174,34 +486,6 @@ eventually review/QA gates.
 
 No official merch. Just a warning label for people who think one model should
 make all the decisions alone.
-
-## Command Contract
-
-`omk` treats advisor output as context, not authority. The executor must still
-inspect the repository, preserve unrelated changes, and verify the final result.
-
-If an advisor fails, `omk run` stops before Codex by default. Set
-`OMK_KEEP_GOING=1` to continue anyway.
-
-```bash
-OMK_KEEP_GOING=1 omk "continue even if one advisor is down"
-```
-
-## Positioning
-
-`oh-my-kamikama` is not a replacement for Claude Code, Codex CLI, Gemini CLI, or
-oh-my-codex. It is the command layer above them:
-
-```text
-Claude + Gemini -> independent advice
-Codex           -> final executor
-opencode        -> optional scout/reviewer lane
-OMX             -> optional goals/team/HUD lane
-cmux            -> optional visible pane/runtime lane
-omk             -> run packet, artifacts, and routing
-```
-
-See [docs/strategy.md](docs/strategy.md) for the roadmap.
 
 ## License
 
