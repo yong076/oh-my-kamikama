@@ -44,6 +44,10 @@ omk cockpit
 The goal is a practical agent control room: one command starts the work, one
 place shows what is running, and every lane leaves files you can inspect later.
 
+`omk` also reads Agent Cat Connectors when available, so the interactive shell
+can show local Codex/Claude/Gemini status, current process activity, and exposed
+remaining quota percentages before routing work.
+
 ## Why This Exists
 
 Most AI coding tools optimize for one runtime:
@@ -135,16 +139,25 @@ Optional:
 - `cmux` for cockpit mode
 - `omx` / `oh-my-codex` for future durable goal/team adapters
 - `opencode` for future scout/reviewer lanes
+- `agentcat` / Agent Cat Connectors for usage, quota, and activity snapshots
 
 Check your local setup:
 
 ```bash
 omk doctor
 omk tools
+omk agents
 ```
 
 `omk doctor` checks the command surface. It does not replace each provider's
 own login or billing/auth checks.
+
+`npm install -g .` runs the Agent Cat Connectors installer automatically unless
+`OMK_SKIP_AGENTCAT_INSTALL=1` is set. You can also run it manually:
+
+```bash
+omk connect
+```
 
 ## Install
 
@@ -173,7 +186,16 @@ omk
 Then type a task:
 
 ```text
-omk:run app> fix the failing parser regression and run the focused tests
+Agents
+------
+agent    cli     state      quota-left         week     proc  cpu     mem
+codex    yes     ok         70.0% 7d           713.0M   5     0.0%    207M
+claude   yes     ok         92.0% 7d           784.6M   5     0.0%    458M
+gemini   yes     ok         94.0% Gemini Pro   5.8M     38    0.0%    163M
+
+activity: walking | suggested: claude (92.0)
+
+omk:auto app> fix the failing parser regression and run the focused tests
 ```
 
 Run the full conductor:
@@ -181,6 +203,11 @@ Run the full conductor:
 ```bash
 omk "fix the failing parser regression and run the focused tests"
 ```
+
+By default, a plain task uses `omk auto`. Auto mode reads Agent Cat quota and
+availability, prefers Codex/Claude, and only falls back to Gemini when Codex and
+Claude are unavailable. Gemini fallback asks for confirmation in interactive
+runs because Gemini quota can be precious or tied to a different account.
 
 Run against another repository:
 
@@ -301,10 +328,15 @@ Background runs write:
 omk
 omk "task"
 omk shell [--repo PATH]
+omk auto [--repo PATH] "task"
 omk run [--repo PATH] "task"
+omk claude [--repo PATH] "task"
+omk gemini [--repo PATH] "task"
 omk advise [--repo PATH] "task"
 omk bg [--repo PATH] "task"
 omk cockpit [--repo PATH] "task"
+omk agents
+omk connect
 omk watch [--repo PATH] [job-id|latest]
 omk ps [--repo PATH]
 omk logs [--repo PATH] [job-id|latest]
@@ -320,22 +352,38 @@ omk doctor
 With no arguments in an interactive terminal, `omk` opens a small prompt:
 
 ```text
-oh-my-kamikama 0.4.0
-Type /help for commands, /exit to quit.
+oh-my-kamikama 0.5.0
 repo: /path/to/repo
-mode: run
+mode: auto
 
-omk:run repo> 
+Agents
+------
+agent    cli     state      quota-left         week     proc  cpu     mem
+codex    yes     ok         70.0% 7d           713.0M   5     0.0%    207M
+claude   yes     ok         92.0% 7d           784.6M   5     0.0%    458M
+gemini   yes     ok         94.0% Gemini Pro   5.8M     38    0.0%    163M
+
+activity: walking | suggested: claude (92.0)
+
+Type a task, /agents to refresh, /mode to switch, /help for commands, /exit to quit.
+
+omk:auto repo>
 ```
 
 Plain text is treated as a task and runs in the current mode. Slash commands
 control the shell:
 
 ```text
+/mode auto      choose the executor from Agent Cat quota/availability
 /mode run       full Claude + Gemini + Codex pipeline
+/mode claude    direct Claude executor
+/mode gemini    direct Gemini executor
 /mode advise    advisors only
 /mode bg        start background jobs
 /mode cockpit   open a cmux cockpit for each task
+/agents         refresh status, quota, activity, and suggested route
+/route          print the current auto route
+/connect        install/check Agent Cat Connectors
 /repo PATH      switch target repository
 /ps             list background jobs
 /logs latest    print the latest job logs
@@ -347,8 +395,9 @@ Example interactive session:
 
 ```text
 $ omk
-omk:run app> review the settings bug and fix it with tests
-omk:run app> /mode cockpit
+omk:auto app> review the settings bug and fix it with tests
+omk:auto app> /agents
+omk:auto app> /mode cockpit
 mode: cockpit
 omk:cockpit app> build the admin audit view and verify it
 omk:cockpit app> /exit
@@ -357,6 +406,25 @@ omk:cockpit app> /exit
 Use `omk shell --repo /path/to/repo` when you want to open the prompt for a
 specific workspace.
 
+### `omk auto`
+
+Auto mode checks Agent Cat Connectors, displays the current provider picture,
+and chooses the executor:
+
+```text
+1. Prefer Codex or Claude when either is available.
+2. Between Codex and Claude, choose the one with the higher remaining quota.
+3. Use Gemini only when Codex and Claude are unavailable.
+4. Ask before using Gemini unless OMK_ALLOW_GEMINI_FALLBACK=1 is set.
+```
+
+```bash
+omk auto --repo ~/work/app "fix the billing export and verify it"
+```
+
+If Agent Cat Connectors are missing, `omk` tries to install them. If usage
+snapshot data is unavailable, auto mode falls back to CLI availability.
+
 ### `omk run`
 
 Full foreground pipeline. Use it when you want the terminal to block until the
@@ -364,6 +432,42 @@ agents finish.
 
 ```bash
 omk run --repo ~/work/app "fix checkout coupon validation and run tests"
+```
+
+This is the original three-lane pipeline: Claude advisor, Gemini advisor, then
+Codex executor.
+
+### `omk claude`
+
+Direct Claude Code executor mode:
+
+```bash
+omk claude --repo ~/work/app "fix the settings crash and summarize verification"
+```
+
+### `omk gemini`
+
+Direct Gemini executor mode. Auto mode asks before falling back to Gemini, but
+this explicit command runs Gemini because you asked for it:
+
+```bash
+omk gemini --repo ~/work/app "fix the docs generator"
+```
+
+### `omk agents`
+
+Prints the Agent Cat status table without opening the shell:
+
+```bash
+omk agents
+```
+
+### `omk connect`
+
+Installs or checks Agent Cat Connectors:
+
+```bash
+omk connect
 ```
 
 ### `omk advise`

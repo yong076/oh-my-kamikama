@@ -83,20 +83,33 @@ Practical translation:
 - `omk watch` refreshes job status and stdout/stderr tails.
 - Offline fake-CLI tests cover the conductor and cockpit generator without model calls.
 
-### v0.4: Deep wish interrogation
+### v0.4: Interactive shell
+
+- `omk` with no arguments opens an interactive prompt.
+- Shell commands route natural-language tasks through selected modes.
+- The prompt can switch repo/mode and inspect jobs without leaving the session.
+
+### v0.5: Agent Cat usage router
+
+- `omk agents` reads Agent Cat Connectors snapshots for Codex/Claude/Gemini.
+- Interactive startup shows provider availability, quota, activity, and route.
+- `omk auto` chooses Codex/Claude by remaining quota and asks before Gemini fallback.
+- npm postinstall checks or installs Agent Cat Connectors unless opted out.
+
+### v0.6: Deep wish interrogation
 
 - `omk plan` creates `.omk/plans/<run>/` with requirements, risks, gates, and
   open questions.
 - Pattern pack detection inspired by divecode.
 - `omk run` can pause when a high-risk unanswered question is found.
 
-### v0.5: Goal and team adapters
+### v0.7: Goal and team adapters
 
 - `omk goal` wraps `omx ultragoal` when installed.
 - `omk team` wraps `omx team` or cmux panes for large work.
 - `omk --with-opencode` adds opencode as scout/reviewer.
 
-### v0.6: Dashboard mode
+### v0.8: Dashboard mode
 
 - Terminal status UI with active lanes, durations, exit codes, and artifact
   links.

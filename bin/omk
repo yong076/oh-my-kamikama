@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 usage() {
   cat <<'EOF'
@@ -9,10 +9,15 @@ Usage:
   omk
   omk "task"
   omk shell [--repo PATH]
+  omk auto [--repo PATH] "task"
   omk run [--repo PATH] "task"
+  omk claude [--repo PATH] "task"
+  omk gemini [--repo PATH] "task"
   omk advise [--repo PATH] "task"
   omk bg [--repo PATH] "task"
   omk cockpit [--repo PATH] "task"
+  omk agents
+  omk connect
   omk watch [--repo PATH] [job-id|latest]
   omk ps [--repo PATH]
   omk logs [--repo PATH] [job-id|latest]
@@ -33,7 +38,10 @@ Options:
 
 Environment:
   OMK_KEEP_GOING=1  Continue to Codex even if an advisor fails.
-  OMK_SHELL_MODE    Initial interactive mode: run, advise, bg, or cockpit.
+  OMK_SHELL_MODE    Initial interactive mode: auto, run, claude, gemini,
+                    advise, bg, or cockpit.
+  OMK_SKIP_AGENTCAT_INSTALL=1
+                    Do not auto-install Agent Cat Connectors.
 EOF
 }
 
@@ -76,6 +84,7 @@ cmd_version() {
     opencode) version="$("$cmd" --version 2>/dev/null || true)" ;;
     omx) version="$("$cmd" --version 2>/dev/null | head -n 1 || true)" ;;
     cmux) version="$("$cmd" version 2>/dev/null || true)" ;;
+    agentcat) version="$("$cmd" version 2>/dev/null || true)" ;;
     *) version="" ;;
   esac
 
@@ -95,6 +104,7 @@ status() {
   cmd_version opencode
   cmd_version omx
   cmd_version cmux
+  cmd_version agentcat
 }
 
 tools() {
@@ -111,11 +121,15 @@ tools() {
   echo "opencode  scout/reviewer lane via 'opencode run' or cmux omo"
   echo "omx       durable goals/team/HUD lane via 'omx ultragoal' and 'omx team'"
   echo "cmux      pane/surface visibility for long-running background work"
+  echo "agentcat  local usage/quota/activity snapshots for auto routing"
   echo
   echo "Recommended modes"
   echo "-----------------"
   echo "omk advise  cheap-ish interrogation before code"
+  echo "omk auto    pick the best available executor from Agent Cat usage"
   echo "omk run     full Claude + Gemini + Codex pipeline"
+  echo "omk claude  direct Claude Code executor"
+  echo "omk gemini  direct Gemini executor with fallback confirmation"
   echo "omk bg      same pipeline in the background with logs and status"
   echo "omk cockpit cmux workspace with status + runner panes"
 }
@@ -134,7 +148,7 @@ doctor() {
     fi
   done
 
-  for cmd in opencode omx cmux; do
+  for cmd in opencode omx cmux agentcat; do
     if have_cmd "$cmd"; then
       echo "[OK] $cmd found (optional)"
     else
@@ -201,6 +215,248 @@ json_escape() {
 
 trim() {
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$1"
+}
+
+agentcat_install_script() {
+  local here candidate
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
+  for candidate in \
+    "$here/../scripts/install-agentcat-connectors.sh" \
+    "$PWD/scripts/install-agentcat-connectors.sh" \
+    "$HOME/Trappist/oh-my-kamikama/scripts/install-agentcat-connectors.sh"; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_agentcat_connectors() {
+  if [[ "${OMK_SKIP_AGENTCAT_INSTALL:-0}" == "1" ]]; then
+    return 0
+  fi
+  if have_cmd agentcat; then
+    return 0
+  fi
+
+  echo "omk: installing Agent Cat Connectors for usage/quota snapshots..." >&2
+  local installer
+  if installer="$(agentcat_install_script 2>/dev/null)"; then
+    bash "$installer" || return 1
+  elif [[ -x "$HOME/Trappist/agentcat-connectors/install.sh" ]]; then
+    bash "$HOME/Trappist/agentcat-connectors/install.sh" || return 1
+  else
+    curl -fsSL https://raw.githubusercontent.com/yong076/agentcat-connectors/main/install.sh | bash || return 1
+  fi
+}
+
+agentcat_snapshot_json() {
+  if have_cmd agentcat; then
+    agentcat snapshot --json 2>/dev/null && return 0
+  fi
+  if [[ -f "$HOME/.agentcat/latest-snapshot.json" ]]; then
+    cat "$HOME/.agentcat/latest-snapshot.json"
+    return 0
+  fi
+  return 1
+}
+
+agentcat_status_table() {
+  local snapshot
+  snapshot="$(agentcat_snapshot_json 2>/dev/null || true)"
+  if [[ -z "$snapshot" ]]; then
+    echo "Agent Cat: unavailable (run: omk connect)"
+    return 0
+  fi
+
+  SNAPSHOT_JSON="$snapshot" python3 - <<'PY'
+import json
+import os
+import shutil
+import sys
+
+try:
+    snap = json.loads(os.environ.get("SNAPSHOT_JSON", "{}"))
+except Exception:
+    print("Agent Cat: snapshot parse failed")
+    sys.exit(0)
+
+providers = snap.get("providers") or {}
+activity = snap.get("activity") or {}
+counts = activity.get("countsByProvider") or {}
+memory = activity.get("memoryBytesByProvider") or {}
+processes = activity.get("processes") or []
+
+cpu = {}
+for proc in processes:
+    provider = proc.get("provider")
+    if not provider:
+        continue
+    try:
+        cpu[provider] = cpu.get(provider, 0.0) + float(proc.get("cpuPercent") or proc.get("cpu") or 0.0)
+    except Exception:
+        pass
+
+def fmt_pct(value):
+    if value is None:
+        return "unknown"
+    try:
+        return f"{float(value):.1f}%"
+    except Exception:
+        return "unknown"
+
+def fmt_int(value):
+    try:
+        value = int(value or 0)
+    except Exception:
+        value = 0
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+def fmt_mem(value):
+    try:
+        value = int(value or 0)
+    except Exception:
+        value = 0
+    if value <= 0:
+        return "-"
+    if value >= 1024 ** 3:
+        return f"{value / (1024 ** 3):.1f}G"
+    return f"{value / (1024 ** 2):.0f}M"
+
+def quota_summary(provider):
+    limits = (providers.get(provider) or {}).get("limits") or {}
+    quotas = limits.get("quotas") or []
+    best = None
+    for quota in quotas:
+        remaining = quota.get("remainingPercent")
+        if remaining is None and quota.get("usedPercent") is not None:
+            try:
+                remaining = 100.0 - float(quota.get("usedPercent"))
+            except Exception:
+                remaining = None
+        if remaining is None:
+            continue
+        try:
+            remaining = float(remaining)
+        except Exception:
+            continue
+        if best is None or remaining < best[0]:
+            best = (remaining, quota)
+    if best is None:
+        return "unknown", None
+    label = best[1].get("label") or best[1].get("window") or "quota"
+    return f"{best[0]:.1f}% {label}", best[0]
+
+def route_score(provider):
+    cli = shutil.which(provider if provider != "claude" else "claude")
+    pdata = providers.get(provider) or {}
+    status = pdata.get("status") or "missing"
+    quota_text, remaining = quota_summary(provider)
+    if not cli or status not in ("ok", "partial", "unknown"):
+        return -1
+    if remaining is None:
+        return 50
+    return remaining
+
+print("Agents")
+print("------")
+print(f"{'agent':<8} {'cli':<7} {'state':<10} {'quota-left':<18} {'week':<8} {'proc':<5} {'cpu':<7} {'mem':<7}")
+for provider in ("codex", "claude", "gemini"):
+    pdata = providers.get(provider) or {}
+    cli = "yes" if shutil.which(provider) else "no"
+    state = pdata.get("status") or "missing"
+    quota_text, _ = quota_summary(provider)
+    week = fmt_int((pdata.get("tokens") or {}).get("week"))
+    proc_count = counts.get(provider, 0)
+    cpu_text = f"{cpu.get(provider, 0.0):.1f}%"
+    mem_text = fmt_mem(memory.get(provider))
+    print(f"{provider:<8} {cli:<7} {state:<10} {quota_text:<18} {week:<8} {proc_count!s:<5} {cpu_text:<7} {mem_text:<7}")
+
+non_gemini = [(route_score(p), p) for p in ("codex", "claude") if route_score(p) >= 0]
+if non_gemini:
+    score, route = sorted(non_gemini, reverse=True)[0]
+elif route_score("gemini") >= 0:
+    score, route = route_score("gemini"), "gemini"
+else:
+    score, route = -1, "none"
+
+activity_text = activity.get("motionStage") or "unknown"
+print()
+print(f"activity: {activity_text} | suggested: {route}" + (f" ({score:.1f})" if score >= 0 else ""))
+PY
+}
+
+agentcat_route_choice() {
+  local snapshot
+  snapshot="$(agentcat_snapshot_json 2>/dev/null || true)"
+  if [[ -z "$snapshot" ]]; then
+    if have_cmd codex; then
+      echo codex
+    elif have_cmd claude; then
+      echo claude
+    elif have_cmd gemini; then
+      echo gemini
+    else
+      echo none
+    fi
+    return 0
+  fi
+
+  SNAPSHOT_JSON="$snapshot" python3 - <<'PY'
+import json
+import os
+import shutil
+
+try:
+    snap = json.loads(os.environ.get("SNAPSHOT_JSON", "{}"))
+except Exception:
+    snap = {}
+providers = snap.get("providers") or {}
+
+def quota_remaining(provider):
+    limits = (providers.get(provider) or {}).get("limits") or {}
+    values = []
+    for quota in limits.get("quotas") or []:
+        value = quota.get("remainingPercent")
+        if value is None and quota.get("usedPercent") is not None:
+            try:
+                value = 100.0 - float(quota.get("usedPercent"))
+            except Exception:
+                value = None
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except Exception:
+            pass
+    return min(values) if values else None
+
+def score(provider):
+    if not shutil.which(provider):
+        return -1
+    status = (providers.get(provider) or {}).get("status") or "unknown"
+    if status not in ("ok", "partial", "unknown"):
+        return -1
+    remaining = quota_remaining(provider)
+    if remaining is None:
+        return 50.0
+    return remaining
+
+primary = [(score(p), p) for p in ("codex", "claude") if score(p) >= 0]
+if primary:
+    print(sorted(primary, reverse=True)[0][1])
+elif score("gemini") >= 0:
+    print("gemini")
+else:
+    print("none")
+PY
 }
 
 prepare_run_dir() {
@@ -376,6 +632,53 @@ run_codex_executor() {
   ) >"$run_dir/codex.out" 2>"$run_dir/codex.err"
 }
 
+direct_executor_prompt() {
+  local provider="$1"
+  local repo_path="$2"
+  local task_text="$3"
+
+  cat <<EOF
+You are the $provider executor in an oh-my-kamikama auto-routed run.
+
+Repository:
+$repo_path
+
+Task:
+$task_text
+
+Inspect the repository before editing. Preserve unrelated user changes. Make the
+narrowest useful change, run focused verification when possible, and finish with
+a concise summary of changes, verification, and any remaining risks.
+EOF
+}
+
+run_claude_executor() {
+  local repo_path="$1"
+  local prompt="$2"
+  local run_dir="$3"
+
+  require_cmd claude
+  (
+    cd "$repo_path"
+    claude --print --permission-mode acceptEdits "$prompt"
+  ) >"$run_dir/claude-exec.out" 2>"$run_dir/claude-exec.err"
+}
+
+run_gemini_executor() {
+  local repo_path="$1"
+  local prompt="$2"
+  local run_dir="$3"
+
+  require_cmd gemini
+  (
+    cd "$repo_path"
+    GEMINI_CLI_TRUST_WORKSPACE=true gemini \
+      --skip-trust \
+      --approval-mode auto_edit \
+      --prompt "$prompt"
+  ) >"$run_dir/gemini-exec.out" 2>"$run_dir/gemini-exec.err"
+}
+
 write_run_summary() {
   local mode="$1"
   local repo_path="$2"
@@ -401,7 +704,62 @@ write_run_summary() {
       echo "- Codex stdout: $run_dir/codex.out"
       echo "- Codex stderr: $run_dir/codex.err"
     fi
+    if [[ -f "$run_dir/claude-exec.out" || -f "$run_dir/claude-exec.err" ]]; then
+      echo "- Claude executor stdout: $run_dir/claude-exec.out"
+      echo "- Claude executor stderr: $run_dir/claude-exec.err"
+    fi
+    if [[ -f "$run_dir/gemini-exec.out" || -f "$run_dir/gemini-exec.err" ]]; then
+      echo "- Gemini executor stdout: $run_dir/gemini-exec.out"
+      echo "- Gemini executor stderr: $run_dir/gemini-exec.err"
+    fi
   } >"$run_dir/RUN.md"
+}
+
+run_direct_executor() {
+  local provider="$1"
+  shift
+  parse_repo_and_task "$@"
+
+  local run_dir prompt status=0 stdout_file stderr_file
+  run_dir="$(prepare_run_dir "$repo" "$task")"
+  prompt="$(direct_executor_prompt "$provider" "$repo" "$task")"
+  printf '%s\n' "$prompt" >"$run_dir/$provider.prompt.md"
+
+  echo "omk run dir: $run_dir"
+  echo "running executor: $provider"
+
+  case "$provider" in
+    codex)
+      run_codex_executor "$repo" "$prompt" "$run_dir" || status=$?
+      stdout_file="$run_dir/codex.out"
+      stderr_file="$run_dir/codex.err"
+      ;;
+    claude)
+      run_claude_executor "$repo" "$prompt" "$run_dir" || status=$?
+      stdout_file="$run_dir/claude-exec.out"
+      stderr_file="$run_dir/claude-exec.err"
+      ;;
+    gemini)
+      run_gemini_executor "$repo" "$prompt" "$run_dir" || status=$?
+      stdout_file="$run_dir/gemini-exec.out"
+      stderr_file="$run_dir/gemini-exec.err"
+      ;;
+    *)
+      die "unknown direct executor: $provider"
+      ;;
+  esac
+
+  write_run_summary "$provider" "$repo" "$task" "$run_dir"
+
+  if [[ -s "$stdout_file" ]]; then
+    cat "$stdout_file"
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    echo "$provider failed; stderr: $stderr_file" >&2
+    return "$status"
+  fi
+
+  echo "omk artifacts: $run_dir"
 }
 
 run_pipeline() {
@@ -455,6 +813,51 @@ run_pipeline() {
   fi
 
   echo "omk artifacts: $run_dir"
+}
+
+confirm_gemini_fallback() {
+  if [[ "${OMK_ALLOW_GEMINI_FALLBACK:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -t 0 ]]; then
+    local answer
+    printf 'Codex/Claude를 사용할 수 없어 Gemini를 사용합니다. 진행할까요? [y/N] '
+    IFS= read -r answer || return 1
+    case "$answer" in
+      y|Y|yes|YES|Yes|ㅇ|ㅇㅇ) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  echo "omk: Gemini fallback requires confirmation. Set OMK_ALLOW_GEMINI_FALLBACK=1 for non-interactive runs." >&2
+  return 1
+}
+
+run_auto() {
+  parse_repo_and_task "$@"
+  ensure_agentcat_connectors || true
+
+  local route
+  route="$(agentcat_route_choice)"
+  echo "omk auto route: $route"
+
+  case "$route" in
+    codex)
+      run_direct_executor codex --repo "$repo" "$task"
+      ;;
+    claude)
+      run_direct_executor claude --repo "$repo" "$task"
+      ;;
+    gemini)
+      confirm_gemini_fallback || {
+        echo "omk auto: cancelled Gemini fallback"
+        return 2
+      }
+      run_direct_executor gemini --repo "$repo" "$task"
+      ;;
+    *)
+      die "no usable agent found. Install/login to codex, claude, or gemini."
+      ;;
+  esac
 }
 
 bg_root_for_repo() {
@@ -750,8 +1153,15 @@ Slash commands:
   /help                 Show this help
   /exit                 Leave the shell
   /repo [PATH]          Show or change target repository
-  /mode [MODE]          Show or set default mode: run, advise, bg, cockpit
+  /mode [MODE]          Show or set default mode: auto, run, claude, gemini,
+                        advise, bg, cockpit
+  /agents               Refresh agent status, usage, and auto route
+  /route                Show the current auto route
+  /connect              Install/check Agent Cat Connectors
+  /auto TASK            Auto-route a task by Agent Cat quota/availability
   /run TASK             Run one task through Claude + Gemini + Codex
+  /claude TASK          Run a direct Claude executor task
+  /gemini TASK          Run a direct Gemini executor task
   /advise TASK          Ask advisors only
   /bg TASK              Start a background conductor job
   /cockpit TASK         Open a cmux cockpit for the task
@@ -768,6 +1178,7 @@ Slash commands:
 
 Examples:
   fix the failing auth test and verify it
+  /agents
   /mode cockpit
   build the admin audit view with tests
   /advise review the safest migration path before coding
@@ -781,8 +1192,17 @@ shell_run_task() {
   local status=0
 
   case "$mode" in
+    auto)
+      run_auto --repo "$repo_path" "$task_text" || status=$?
+      ;;
     run)
       run_pipeline run --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    claude)
+      run_direct_executor claude --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    gemini)
+      run_direct_executor gemini --repo "$repo_path" "$task_text" || status=$?
       ;;
     advise)
       run_pipeline advise --repo "$repo_path" "$task_text" || status=$?
@@ -809,16 +1229,22 @@ interactive_shell() {
   parse_repo_only "$@"
 
   local shell_repo="$repo"
-  local shell_mode="${OMK_SHELL_MODE:-run}"
+  local shell_mode="${OMK_SHELL_MODE:-auto}"
   case "$shell_mode" in
-    run|advise|bg|cockpit|cmux) ;;
-    *) shell_mode="run" ;;
+    auto|run|claude|gemini|advise|bg|cockpit|cmux) ;;
+    *) shell_mode="auto" ;;
   esac
 
+  ensure_agentcat_connectors || true
+
+  clear 2>/dev/null || true
   echo "oh-my-kamikama $VERSION"
-  echo "Type /help for commands, /exit to quit."
   echo "repo: $shell_repo"
   echo "mode: $shell_mode"
+  echo
+  agentcat_status_table
+  echo
+  echo "Type a task, /agents to refresh, /mode to switch, /help for commands, /exit to quit."
   echo
 
   local line trimmed cmd rest prompt_base
@@ -867,20 +1293,44 @@ interactive_shell() {
             echo "$shell_mode"
           else
             case "$rest" in
-              run|advise|bg|cockpit|cmux)
+              auto|run|claude|gemini|advise|bg|cockpit|cmux)
                 shell_mode="$rest"
                 echo "mode: $shell_mode"
                 ;;
               *)
                 echo "unknown mode: $rest" >&2
-                echo "valid modes: run, advise, bg, cockpit" >&2
+                echo "valid modes: auto, run, claude, gemini, advise, bg, cockpit" >&2
                 ;;
             esac
           fi
           ;;
+        /agents)
+          ensure_agentcat_connectors || true
+          agentcat_status_table
+          ;;
+        /route)
+          ensure_agentcat_connectors || true
+          echo "auto route: $(agentcat_route_choice)"
+          ;;
+        /connect)
+          ensure_agentcat_connectors
+          agentcat_status_table
+          ;;
+        /auto)
+          [[ -n "$rest" ]] || { echo "usage: /auto TASK" >&2; continue; }
+          shell_run_task auto "$shell_repo" "$rest"
+          ;;
         /run)
           [[ -n "$rest" ]] || { echo "usage: /run TASK" >&2; continue; }
           shell_run_task run "$shell_repo" "$rest"
+          ;;
+        /claude)
+          [[ -n "$rest" ]] || { echo "usage: /claude TASK" >&2; continue; }
+          shell_run_task claude "$shell_repo" "$rest"
+          ;;
+        /gemini)
+          [[ -n "$rest" ]] || { echo "usage: /gemini TASK" >&2; continue; }
+          shell_run_task gemini "$shell_repo" "$rest"
           ;;
         /advise)
           [[ -n "$rest" ]] || { echo "usage: /advise TASK" >&2; continue; }
@@ -957,9 +1407,21 @@ main() {
       shift
       interactive_shell "$@"
       ;;
+    auto)
+      shift
+      run_auto "$@"
+      ;;
     run)
       shift
       run_pipeline run "$@"
+      ;;
+    claude)
+      shift
+      run_direct_executor claude "$@"
+      ;;
+    gemini)
+      shift
+      run_direct_executor gemini "$@"
       ;;
     advise)
       shift
@@ -993,6 +1455,16 @@ main() {
       shift
       kill_job "$@"
       ;;
+    agents)
+      shift
+      ensure_agentcat_connectors || true
+      agentcat_status_table "$@"
+      ;;
+    connect)
+      shift
+      ensure_agentcat_connectors
+      agentcat_status_table "$@"
+      ;;
     tools)
       shift
       tools "$@"
@@ -1012,7 +1484,7 @@ main() {
       echo "$VERSION"
       ;;
     *)
-      run_pipeline run "$@"
+      run_auto "$@"
       ;;
   esac
 }
