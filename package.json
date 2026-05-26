@@ -1,6 +1,6 @@
 {
   "name": "oh-my-kamikama",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "One command. Many agents. A local conductor for Claude, Gemini, Codex, OMX, OMO, and cmux-aware vibe coding.",
   "license": "MIT",
   "type": "commonjs",
@@ -9,7 +9,8 @@
   },
   "files": [
     "bin",
-    "assets",
+    "assets/omk-goddess-terminal.svg",
+    "assets/omk-shirt.svg",
     "docs",
     "scripts",
     "tests",
@@ -21,7 +22,7 @@
   },
   "scripts": {
     "postinstall": "bash scripts/install-agentcat-connectors.sh || true",
-    "test": "bash -n bin/omk && bash -n scripts/quant-smoke.sh && bash -n scripts/install-agentcat-connectors.sh && bash tests/test-offline-pipeline.sh && bash tests/test-cockpit-generation.sh && bash tests/test-shell-mode.sh && bash tests/test-agent-routing.sh && bash tests/test-shell-surfaces.sh"
+    "test": "bash -n bin/omk && node --check bin/omk-repl.js && bash -n scripts/quant-smoke.sh && bash -n scripts/install-agentcat-connectors.sh && bash tests/test-offline-pipeline.sh && bash tests/test-cockpit-generation.sh && bash tests/test-shell-mode.sh && bash tests/test-agent-routing.sh && bash tests/test-shell-surfaces.sh && bash tests/test-node-repl.sh"
   },
   "keywords": [
     "ai",
