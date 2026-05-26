@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/omk-goddess-terminal.svg" alt="Oh My Kamisama — One command. Many agents." />
+  <img src="assets/omk-hero-banner.png" alt="Oh My Kamisama — One command. Many agents." />
 </p>
 
 <h1 align="center">oh-my-kamikama</h1>
@@ -76,6 +76,10 @@ This is intentionally *not* a token-saving tool. The point is to **spend more ag
 ---
 
 ## What it is
+
+<p align="center">
+  <img src="assets/omk-kamisama.png" alt="Oh My Kamisama" width="360" />
+</p>
 
 `oh-my-kamikama` is a **command layer above the AI coding CLIs you already use**. It does not replace Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, or cmux. It coordinates them.
 
@@ -602,7 +606,7 @@ Longer-term:
 ## Merch
 
 <p align="center">
-  <img src="assets/omk-shirt.svg" alt="Oh My Kamisama unofficial merch concept" width="420" />
+  <img src="assets/omk-merch.png" alt="Oh My Kamisama unofficial merch concept" width="720" />
 </p>
 
 No official merch. Just a warning label for people who think one model should make all the decisions alone.
