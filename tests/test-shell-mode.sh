@@ -48,7 +48,7 @@ chmod +x "$fake_bin/claude" "$fake_bin/gemini" "$fake_bin/codex"
 } | OMK_SKIP_AGENTCAT_INSTALL=1 PATH="$fake_bin:$PATH" "$repo_root/bin/omk" shell --repo "$work_repo" \
   >"$test_root/omk.out" 2>"$test_root/omk.err"
 
-grep -q "mode: run" "$test_root/omk.out"
+grep -q "mode run" "$test_root/omk.out"
 grep -q "fake-claude" "$test_root/omk.out"
 grep -q "SHELL-FAKE-CODEX-OK" "$test_root/omk.out"
 

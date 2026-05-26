@@ -1,6 +1,6 @@
 {
   "name": "oh-my-kamikama",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "One command. Many agents. A local conductor for Claude, Gemini, Codex, OMX, OMO, and cmux-aware vibe coding.",
   "license": "MIT",
   "type": "commonjs",

@@ -357,22 +357,16 @@ omk doctor
 With no arguments in an interactive terminal, `omk` opens a small prompt:
 
 ```text
-oh-my-kamikama 0.5.0
-repo: /path/to/repo
-mode: auto
-
-Agents
-------
-agent    cli     state      quota-left         week     proc  cpu     mem
-codex    yes     ok         70.0% 7d           713.0M   5     0.0%    207M
-claude   yes     ok         92.0% 7d           784.6M   5     0.0%    458M
-gemini   yes     ok         94.0% Gemini Pro   5.8M     38    0.0%    163M
-
-activity: walking | suggested: claude (92.0)
-
-Type a task, /agents to refresh, /mode to switch, /help for commands, /exit to quit.
-
-omk:auto repo>
+Tip: type a task, /agents for detail, /context for repo, /exit to quit
+           Oh My Kamisama v0.7.0
+   OMK     mode auto | route claude
+  /|||\    ~/work/app
+   |||
+------------------------------------------------------------------------
+agents: Codex 70% 7d ok | Claude 92% 7d ok | Gemini 94% Gemini Pro ok
+route: claude | activity: walking
+------------------------------------------------------------------------
+❯
 ```
 
 Plain text is treated as a task and runs in the current mode. Slash commands
@@ -387,6 +381,7 @@ control the shell:
 /mode bg        start background jobs
 /mode cockpit   open a cmux cockpit for each task
 /agents         refresh status, quota, activity, and suggested route
+/refresh        redraw the launch screen
 /route          print the current auto route
 /connect        install/check Agent Cat Connectors
 /context        show repo branch, scripts, surfaces, and route

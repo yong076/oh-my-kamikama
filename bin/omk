@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.6.0"
+VERSION="0.7.0"
 
 usage() {
   cat <<'EOF'
@@ -396,6 +396,138 @@ activity_text = activity.get("motionStage") or "unknown"
 print()
 print(f"activity: {activity_text} | suggested: {route}" + (f" ({score:.1f})" if score >= 0 else ""))
 PY
+}
+
+agentcat_status_compact() {
+  local snapshot
+  snapshot="$(agentcat_snapshot_json 2>/dev/null || true)"
+  if [[ -z "$snapshot" ]]; then
+    echo "agents: Agent Cat unavailable (run /connect)"
+    echo "route: $(agentcat_route_choice 2>/dev/null || echo unknown)"
+    return 0
+  fi
+
+  SNAPSHOT_JSON="$snapshot" python3 - <<'PY'
+import json
+import os
+import shutil
+
+try:
+    snap = json.loads(os.environ.get("SNAPSHOT_JSON", "{}"))
+except Exception:
+    print("agents: snapshot parse failed")
+    print("route: unknown")
+    raise SystemExit(0)
+
+providers = snap.get("providers") or {}
+activity = snap.get("activity") or {}
+
+def quota(provider):
+    pdata = providers.get(provider) or {}
+    limits = pdata.get("limits") or {}
+    best = None
+    for item in limits.get("quotas") or []:
+        value = item.get("remainingPercent")
+        if value is None and item.get("usedPercent") is not None:
+            try:
+                value = 100.0 - float(item.get("usedPercent"))
+            except Exception:
+                value = None
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except Exception:
+            continue
+        if best is None or value < best[0]:
+            best = (value, item)
+    if best is None:
+        return "unknown", None
+    label = best[1].get("label") or best[1].get("window") or "quota"
+    return f"{best[0]:.0f}% {label}", best[0]
+
+def score(provider):
+    if not shutil.which(provider):
+        return -1.0
+    status = (providers.get(provider) or {}).get("status") or "unknown"
+    if status not in ("ok", "partial", "unknown"):
+        return -1.0
+    _, value = quota(provider)
+    return 50.0 if value is None else value
+
+parts = []
+for name, label in (("codex", "Codex"), ("claude", "Claude"), ("gemini", "Gemini")):
+    cli = "ok" if shutil.which(name) else "missing"
+    q, _ = quota(name)
+    parts.append(f"{label} {q} {cli}")
+
+primary = [(score(p), p) for p in ("codex", "claude") if score(p) >= 0]
+if primary:
+    route = sorted(primary, reverse=True)[0][1]
+elif score("gemini") >= 0:
+    route = "gemini"
+else:
+    route = "none"
+
+motion = activity.get("motionStage") or "unknown"
+print("agents: " + " | ".join(parts))
+print(f"route: {route} | activity: {motion}")
+PY
+}
+
+short_path() {
+  local path="$1"
+  if [[ "$path" == "$HOME" ]]; then
+    echo "~"
+  elif [[ "$path" == "$HOME/"* ]]; then
+    echo "~/${path#"$HOME/"}"
+  else
+    echo "$path"
+  fi
+}
+
+terminal_columns() {
+  local cols
+  cols="$(tput cols 2>/dev/null || true)"
+  if [[ -z "$cols" || "$cols" -lt 50 ]]; then
+    cols=72
+  fi
+  if [[ "$cols" -gt 96 ]]; then
+    cols=96
+  fi
+  echo "$cols"
+}
+
+rule_line() {
+  local cols char
+  cols="$(terminal_columns)"
+  char="${1:--}"
+  printf '%*s\n' "$cols" '' | tr ' ' "$char"
+}
+
+shell_prompt_glyph() {
+  if [[ "${OMK_ASCII:-0}" == "1" ]]; then
+    echo ">"
+  else
+    echo "❯"
+  fi
+}
+
+shell_banner() {
+  local shell_repo="$1"
+  local shell_mode="$2"
+  local route repo_short
+  route="$(agentcat_route_choice 2>/dev/null || echo unknown)"
+  repo_short="$(short_path "$shell_repo")"
+
+  echo "Tip: type a task, /agents for detail, /context for repo, /exit to quit"
+  echo "           Oh My Kamisama v$VERSION"
+  echo "   OMK     mode $shell_mode | route $route"
+  echo "  /|||\\    $repo_short"
+  echo "   |||"
+  rule_line "-"
+  agentcat_status_compact
+  rule_line "-"
 }
 
 agentcat_route_choice() {
@@ -1371,6 +1503,7 @@ Slash commands:
   /mode [MODE]          Show or set default mode: auto, run, claude, gemini,
                         advise, bg, cockpit
   /agents               Refresh agent status, usage, and auto route
+  /refresh              Redraw the launch screen
   /route                Show the current auto route
   /connect              Install/check Agent Cat Connectors
   /context              Show repo branch, scripts, surfaces, and route
@@ -1461,19 +1594,14 @@ interactive_shell() {
   ensure_agentcat_connectors || true
 
   clear 2>/dev/null || true
-  echo "oh-my-kamikama $VERSION"
-  echo "repo: $shell_repo"
-  echo "mode: $shell_mode"
-  echo
-  agentcat_status_table
-  echo
-  echo "Type a task, /agents to refresh, /mode to switch, /help for commands, /exit to quit."
+  shell_banner "$shell_repo" "$shell_mode"
   echo
 
-  local line trimmed cmd rest prompt_base
+  local line trimmed cmd rest prompt_base glyph
   while true; do
     prompt_base="$(basename "$shell_repo")"
-    printf 'omk:%s %s> ' "$shell_mode" "$prompt_base"
+    glyph="$(shell_prompt_glyph)"
+    printf '%s ' "$glyph"
     if ! IFS= read -r line; then
       echo
       break
@@ -1505,7 +1633,8 @@ interactive_shell() {
             local next_repo
             if next_repo="$(cd "$rest" && pwd)"; then
               shell_repo="$next_repo"
-              echo "repo: $shell_repo"
+              clear 2>/dev/null || true
+              shell_banner "$shell_repo" "$shell_mode"
             else
               echo "repo not found: $rest" >&2
             fi
@@ -1518,7 +1647,8 @@ interactive_shell() {
             case "$rest" in
               auto|run|claude|gemini|advise|bg|cockpit|cmux)
                 shell_mode="$rest"
-                echo "mode: $shell_mode"
+                clear 2>/dev/null || true
+                shell_banner "$shell_repo" "$shell_mode"
                 ;;
               *)
                 echo "unknown mode: $rest" >&2
@@ -1530,6 +1660,10 @@ interactive_shell() {
         /agents)
           ensure_agentcat_connectors || true
           agentcat_status_table
+          ;;
+        /refresh|/home)
+          clear 2>/dev/null || true
+          shell_banner "$shell_repo" "$shell_mode"
           ;;
         /route)
           ensure_agentcat_connectors || true
@@ -1615,6 +1749,7 @@ interactive_shell() {
           ;;
         /clear)
           clear 2>/dev/null || true
+          shell_banner "$shell_repo" "$shell_mode"
           ;;
         /!)
           [[ -n "$rest" ]] || { echo "usage: /! COMMAND" >&2; continue; }
