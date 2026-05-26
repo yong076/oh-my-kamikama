@@ -2,7 +2,7 @@
   <img src="assets/omk-hero-banner.png" alt="Oh My Kamisama — One command. Many agents." />
 </p>
 
-<h1 align="center">oh-my-kamikama</h1>
+<h1 align="center">oh-my-kamisama</h1>
 
 <p align="center">
   <b>명령 하나, 에이전트 여럿, 약간 수상한 자신감.</b><br/>
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="#설치"><img alt="npm" src="https://img.shields.io/badge/npm-oh--my--kamikama-cf68ff?style=flat-square&logo=npm"/></a>
+  <a href="#설치"><img alt="npm" src="https://img.shields.io/badge/npm-oh--my--kamisama-cf68ff?style=flat-square&logo=npm"/></a>
   <a href="#요구사항"><img alt="node" src="https://img.shields.io/badge/node-%E2%89%A520-3c873a?style=flat-square&logo=node.js&logoColor=white"/></a>
   <img alt="platform" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20WSL-444?style=flat-square"/>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
@@ -82,7 +82,7 @@ omk "실패한 auth 테스트 고치고 검증해줘"
   <img src="assets/omk-kamisama.png" alt="Oh My Kamisama" width="360" />
 </p>
 
-`oh-my-kamikama`는 이미 쓰고 있는 AI 코딩 CLI 위에 얹는 명령 계층입니다. Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, cmux를 대체하지 않습니다. 조율합니다.
+`oh-my-kamisama`는 이미 쓰고 있는 AI 코딩 CLI 위에 얹는 명령 계층입니다. Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, cmux를 대체하지 않습니다. 조율합니다.
 
 작업을 하나 던지면, 여러 네이티브 코딩 에이전트가 각자 다른 각도로 그 작업을 들여다본 결과를 아티팩트로 기록하고, 마지막 실행을 Codex에게 그 컨텍스트와 함께 넘깁니다.
 
@@ -148,14 +148,14 @@ omk cockpit
 ### npm에서 (배포 후)
 
 ```bash
-npm install -g oh-my-kamikama
+npm install -g oh-my-kamisama
 ```
 
 ### 이 저장소에서
 
 ```bash
-git clone https://github.com/yong076/oh-my-kamikama
-cd oh-my-kamikama
+git clone https://github.com/yong076/oh-my-kamisama
+cd oh-my-kamisama
 npm install -g .
 ```
 
@@ -522,7 +522,7 @@ OMK_KEEP_GOING=1 omk --repo ~/work/app "어드바이저 하나 죽어도 진행�
 
 ## omo / omx / cmux 와의 관계
 
-`oh-my-kamikama`는 로컬 도구들 위에 얹힙니다.
+`oh-my-kamisama`는 로컬 도구들 위에 얹힙니다.
 
 ```text
 ┌──────────────────────────────────────────────────────────┐

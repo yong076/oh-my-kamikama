@@ -2,7 +2,7 @@
   <img src="assets/omk-hero-banner.png" alt="Oh My Kamisama — One command. Many agents." />
 </p>
 
-<h1 align="center">oh-my-kamikama</h1>
+<h1 align="center">oh-my-kamisama</h1>
 
 <p align="center">
   <b>One command. Many agents. A suspicious amount of confidence.</b><br/>
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="#install"><img alt="npm" src="https://img.shields.io/badge/npm-oh--my--kamikama-cf68ff?style=flat-square&logo=npm"/></a>
+  <a href="#install"><img alt="npm" src="https://img.shields.io/badge/npm-oh--my--kamisama-cf68ff?style=flat-square&logo=npm"/></a>
   <a href="#requirements"><img alt="node" src="https://img.shields.io/badge/node-%E2%89%A520-3c873a?style=flat-square&logo=node.js&logoColor=white"/></a>
   <img alt="platform" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20WSL-444?style=flat-square"/>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
@@ -85,7 +85,7 @@ This is intentionally *not* a token-saving tool. The point is to **spend more ag
   <img src="assets/omk-kamisama.png" alt="Oh My Kamisama" width="360" />
 </p>
 
-`oh-my-kamikama` is a **command layer above the AI coding CLIs you already use**. It does not replace Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, or cmux. It coordinates them.
+`oh-my-kamisama` is a **command layer above the AI coding CLIs you already use**. It does not replace Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, or cmux. It coordinates them.
 
 You give it one task. It asks multiple native coding agents to think about the task from different angles, **records their outputs as artifacts**, then hands the final execution to Codex with that context.
 
@@ -151,14 +151,14 @@ omk cockpit
 ### From npm (when published)
 
 ```bash
-npm install -g oh-my-kamikama
+npm install -g oh-my-kamisama
 ```
 
 ### From this repository
 
 ```bash
-git clone https://github.com/yong076/oh-my-kamikama
-cd oh-my-kamikama
+git clone https://github.com/yong076/oh-my-kamisama
+cd oh-my-kamisama
 npm install -g .
 ```
 
@@ -542,7 +542,7 @@ OMK_KEEP_GOING=1 omk --repo ~/work/app "continue even if one advisor is down"
 
 ## Where it fits (omo / omx / cmux)
 
-`oh-my-kamikama` sits **above** the local tools:
+`oh-my-kamisama` sits **above** the local tools:
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
