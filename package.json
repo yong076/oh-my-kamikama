@@ -1,5 +1,5 @@
 {
-  "name": "oh-my-kamikama",
+  "name": "oh-my-kamisama",
   "version": "0.8.0",
   "description": "One command. Many agents. A local conductor for Claude, Gemini, Codex, OMX, OMO, and cmux-aware vibe coding.",
   "license": "MIT",
@@ -11,10 +11,14 @@
     "bin",
     "assets/omk-goddess-terminal.svg",
     "assets/omk-shirt.svg",
+    "assets/omk-hero-banner.png",
+    "assets/omk-kamisama.png",
+    "assets/omk-merch.png",
     "docs",
     "scripts",
     "tests",
     "README.md",
+    "README.ko.md",
     "LICENSE"
   ],
   "engines": {
@@ -36,10 +40,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yong076/oh-my-kamikama.git"
+    "url": "git+https://github.com/yong076/oh-my-kamisama.git"
   },
   "bugs": {
-    "url": "https://github.com/yong076/oh-my-kamikama/issues"
+    "url": "https://github.com/yong076/oh-my-kamisama/issues"
   },
-  "homepage": "https://github.com/yong076/oh-my-kamikama#readme"
+  "homepage": "https://github.com/yong076/oh-my-kamisama#readme"
 }
