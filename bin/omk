@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 usage() {
   cat <<'EOF'
 Usage:
+  omk
   omk "task"
+  omk shell [--repo PATH]
   omk run [--repo PATH] "task"
   omk advise [--repo PATH] "task"
   omk bg [--repo PATH] "task"
@@ -31,6 +33,7 @@ Options:
 
 Environment:
   OMK_KEEP_GOING=1  Continue to Codex even if an advisor fails.
+  OMK_SHELL_MODE    Initial interactive mode: run, advise, bg, or cockpit.
 EOF
 }
 
@@ -194,6 +197,10 @@ quote_shell() {
 
 json_escape() {
   awk 'BEGIN { ORS = "" } { gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); print }' <<<"$1"
+}
+
+trim() {
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$1"
 }
 
 prepare_run_dir() {
@@ -733,13 +740,223 @@ kill_job() {
   echo "killed $(job_id_from_dir "$job_dir") pid=$pid"
 }
 
+shell_help() {
+  cat <<'EOF'
+oh-my-kamikama interactive shell
+
+Type a natural-language task and press Enter. The current mode decides how it runs.
+
+Slash commands:
+  /help                 Show this help
+  /exit                 Leave the shell
+  /repo [PATH]          Show or change target repository
+  /mode [MODE]          Show or set default mode: run, advise, bg, cockpit
+  /run TASK             Run one task through Claude + Gemini + Codex
+  /advise TASK          Ask advisors only
+  /bg TASK              Start a background conductor job
+  /cockpit TASK         Open a cmux cockpit for the task
+  /ps                   List background jobs for the current repo
+  /logs [JOB|latest]    Print job logs
+  /tail [JOB|latest]    Follow job logs
+  /watch [JOB|latest]   Watch job status and tails
+  /kill JOB|latest      Stop a background job
+  /tools                Show detected tools
+  /status               Show omk and provider versions
+  /doctor               Check required and optional CLIs
+  /! COMMAND            Run a shell command in the current repo
+  /clear                Clear the screen
+
+Examples:
+  fix the failing auth test and verify it
+  /mode cockpit
+  build the admin audit view with tests
+  /advise review the safest migration path before coding
+EOF
+}
+
+shell_run_task() {
+  local mode="$1"
+  local repo_path="$2"
+  local task_text="$3"
+  local status=0
+
+  case "$mode" in
+    run)
+      run_pipeline run --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    advise)
+      run_pipeline advise --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    bg)
+      bg_run --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    cockpit|cmux)
+      cockpit_launch --repo "$repo_path" "$task_text" || status=$?
+      ;;
+    *)
+      echo "unknown mode: $mode" >&2
+      status=2
+      ;;
+  esac
+
+  if [[ "$status" -ne 0 ]]; then
+    echo "omk shell: task exited with status $status" >&2
+  fi
+  return 0
+}
+
+interactive_shell() {
+  parse_repo_only "$@"
+
+  local shell_repo="$repo"
+  local shell_mode="${OMK_SHELL_MODE:-run}"
+  case "$shell_mode" in
+    run|advise|bg|cockpit|cmux) ;;
+    *) shell_mode="run" ;;
+  esac
+
+  echo "oh-my-kamikama $VERSION"
+  echo "Type /help for commands, /exit to quit."
+  echo "repo: $shell_repo"
+  echo "mode: $shell_mode"
+  echo
+
+  local line trimmed cmd rest prompt_base
+  while true; do
+    prompt_base="$(basename "$shell_repo")"
+    printf 'omk:%s %s> ' "$shell_mode" "$prompt_base"
+    if ! IFS= read -r line; then
+      echo
+      break
+    fi
+
+    trimmed="$(trim "$line")"
+    [[ -n "$trimmed" ]] || continue
+
+    if [[ "$trimmed" == /* ]]; then
+      cmd="${trimmed%%[[:space:]]*}"
+      rest="$trimmed"
+      if [[ "$rest" == "$cmd" ]]; then
+        rest=""
+      else
+        rest="$(trim "${trimmed#"$cmd"}")"
+      fi
+
+      case "$cmd" in
+        /help|/?)
+          shell_help
+          ;;
+        /exit|/quit)
+          break
+          ;;
+        /repo)
+          if [[ -z "$rest" ]]; then
+            echo "$shell_repo"
+          else
+            local next_repo
+            if next_repo="$(cd "$rest" && pwd)"; then
+              shell_repo="$next_repo"
+              echo "repo: $shell_repo"
+            else
+              echo "repo not found: $rest" >&2
+            fi
+          fi
+          ;;
+        /mode)
+          if [[ -z "$rest" ]]; then
+            echo "$shell_mode"
+          else
+            case "$rest" in
+              run|advise|bg|cockpit|cmux)
+                shell_mode="$rest"
+                echo "mode: $shell_mode"
+                ;;
+              *)
+                echo "unknown mode: $rest" >&2
+                echo "valid modes: run, advise, bg, cockpit" >&2
+                ;;
+            esac
+          fi
+          ;;
+        /run)
+          [[ -n "$rest" ]] || { echo "usage: /run TASK" >&2; continue; }
+          shell_run_task run "$shell_repo" "$rest"
+          ;;
+        /advise)
+          [[ -n "$rest" ]] || { echo "usage: /advise TASK" >&2; continue; }
+          shell_run_task advise "$shell_repo" "$rest"
+          ;;
+        /bg)
+          [[ -n "$rest" ]] || { echo "usage: /bg TASK" >&2; continue; }
+          shell_run_task bg "$shell_repo" "$rest"
+          ;;
+        /cockpit|/cmux)
+          [[ -n "$rest" ]] || { echo "usage: /cockpit TASK" >&2; continue; }
+          shell_run_task cockpit "$shell_repo" "$rest"
+          ;;
+        /ps)
+          ps_jobs --repo "$shell_repo" || true
+          ;;
+        /logs)
+          logs_job --repo "$shell_repo" "${rest:-latest}" || true
+          ;;
+        /tail)
+          tail_job --repo "$shell_repo" "${rest:-latest}" || true
+          ;;
+        /watch)
+          watch_jobs --repo "$shell_repo" "${rest:-latest}" || true
+          ;;
+        /kill)
+          [[ -n "$rest" ]] || { echo "usage: /kill JOB|latest" >&2; continue; }
+          kill_job --repo "$shell_repo" "$rest" || true
+          ;;
+        /tools)
+          tools
+          ;;
+        /status)
+          status
+          ;;
+        /doctor)
+          doctor || true
+          ;;
+        /clear)
+          clear 2>/dev/null || true
+          ;;
+        /!)
+          [[ -n "$rest" ]] || { echo "usage: /! COMMAND" >&2; continue; }
+          (cd "$shell_repo" && bash -lc "$rest") || true
+          ;;
+        /!*)
+          rest="$(trim "${trimmed#/!}")"
+          [[ -n "$rest" ]] || { echo "usage: /! COMMAND" >&2; continue; }
+          (cd "$shell_repo" && bash -lc "$rest") || true
+          ;;
+        *)
+          echo "unknown command: $cmd" >&2
+          echo "type /help for commands" >&2
+          ;;
+      esac
+    else
+      shell_run_task "$shell_mode" "$shell_repo" "$trimmed"
+    fi
+  done
+}
+
 main() {
   [[ $# -gt 0 ]] || {
-    usage
+    if [[ -t 0 && -t 1 ]]; then
+      interactive_shell
+    else
+      usage
+    fi
     exit 0
   }
 
   case "$1" in
+    shell|repl|interactive)
+      shift
+      interactive_shell "$@"
+      ;;
     run)
       shift
       run_pipeline run "$@"

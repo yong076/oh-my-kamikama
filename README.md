@@ -163,6 +163,19 @@ Or run directly:
 
 ## Quick Start
 
+Open the interactive conductor:
+
+```bash
+cd /path/to/repo
+omk
+```
+
+Then type a task:
+
+```text
+omk:run app> fix the failing parser regression and run the focused tests
+```
+
 Run the full conductor:
 
 ```bash
@@ -285,7 +298,9 @@ Background runs write:
 ## Command Reference
 
 ```bash
+omk
 omk "task"
+omk shell [--repo PATH]
 omk run [--repo PATH] "task"
 omk advise [--repo PATH] "task"
 omk bg [--repo PATH] "task"
@@ -299,6 +314,48 @@ omk tools
 omk status
 omk doctor
 ```
+
+### `omk`
+
+With no arguments in an interactive terminal, `omk` opens a small prompt:
+
+```text
+oh-my-kamikama 0.4.0
+Type /help for commands, /exit to quit.
+repo: /path/to/repo
+mode: run
+
+omk:run repo> 
+```
+
+Plain text is treated as a task and runs in the current mode. Slash commands
+control the shell:
+
+```text
+/mode run       full Claude + Gemini + Codex pipeline
+/mode advise    advisors only
+/mode bg        start background jobs
+/mode cockpit   open a cmux cockpit for each task
+/repo PATH      switch target repository
+/ps             list background jobs
+/logs latest    print the latest job logs
+/tail latest    follow the latest job logs
+/! git status   run a shell command inside the repo
+```
+
+Example interactive session:
+
+```text
+$ omk
+omk:run app> review the settings bug and fix it with tests
+omk:run app> /mode cockpit
+mode: cockpit
+omk:cockpit app> build the admin audit view and verify it
+omk:cockpit app> /exit
+```
+
+Use `omk shell --repo /path/to/repo` when you want to open the prompt for a
+specific workspace.
 
 ### `omk run`
 
