@@ -337,6 +337,11 @@ omk bg [--repo PATH] "task"
 omk cockpit [--repo PATH] "task"
 omk agents
 omk connect
+omk context [--repo PATH]
+omk diff [--repo PATH]
+omk cost
+omk tasks [--repo PATH]
+omk task [--repo PATH] <add|done|list> [...]
 omk watch [--repo PATH] [job-id|latest]
 omk ps [--repo PATH]
 omk logs [--repo PATH] [job-id|latest]
@@ -384,6 +389,12 @@ control the shell:
 /agents         refresh status, quota, activity, and suggested route
 /route          print the current auto route
 /connect        install/check Agent Cat Connectors
+/context        show repo branch, scripts, surfaces, and route
+/diff           show git status and diff stats
+/cost           show Agent Cat usage/cost summary
+/tasks          list the local .omk task queue
+/task TASK      add a local task
+/done ID        mark a local task done
 /repo PATH      switch target repository
 /ps             list background jobs
 /logs latest    print the latest job logs
@@ -405,6 +416,10 @@ omk:cockpit app> /exit
 
 Use `omk shell --repo /path/to/repo` when you want to open the prompt for a
 specific workspace.
+
+The shell deliberately mirrors the useful parts of modern coding-agent CLIs:
+slash commands, quick repo context, usage/cost views, diff views, and a small
+local task queue. It does not embed or reuse proprietary agent source code.
 
 ### `omk auto`
 
@@ -468,6 +483,43 @@ Installs or checks Agent Cat Connectors:
 
 ```bash
 omk connect
+```
+
+### `omk context`
+
+Prints a compact repo snapshot:
+
+```bash
+omk context --repo ~/work/app
+```
+
+It includes the auto route, git branch, dirty file count, detected project
+surfaces, and npm scripts when a `package.json` exists.
+
+### `omk diff`
+
+Shows git status plus unstaged/staged diff stats:
+
+```bash
+omk diff --repo ~/work/app
+```
+
+### `omk cost`
+
+Shows Agent Cat usage/cost summary:
+
+```bash
+omk cost
+```
+
+### `omk task` / `omk tasks`
+
+Stores a tiny local task queue under `.omk/tasks.tsv`:
+
+```bash
+omk task --repo ~/work/app add "write regression test"
+omk tasks --repo ~/work/app
+omk task --repo ~/work/app done 1
 ```
 
 ### `omk advise`

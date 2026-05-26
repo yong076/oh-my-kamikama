@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 
 usage() {
   cat <<'EOF'
@@ -18,6 +18,11 @@ Usage:
   omk cockpit [--repo PATH] "task"
   omk agents
   omk connect
+  omk context [--repo PATH]
+  omk diff [--repo PATH]
+  omk cost
+  omk tasks [--repo PATH]
+  omk task [--repo PATH] <add|done|list> [...]
   omk watch [--repo PATH] [job-id|latest]
   omk ps [--repo PATH]
   omk logs [--repo PATH] [job-id|latest]
@@ -457,6 +462,216 @@ elif score("gemini") >= 0:
 else:
     print("none")
 PY
+}
+
+agentcat_cost_report() {
+  local snapshot
+  snapshot="$(agentcat_snapshot_json 2>/dev/null || true)"
+  if [[ -z "$snapshot" ]]; then
+    echo "Usage: unavailable (run: omk connect)"
+    return 0
+  fi
+
+  SNAPSHOT_JSON="$snapshot" python3 - <<'PY'
+import json
+import os
+
+try:
+    snap = json.loads(os.environ.get("SNAPSHOT_JSON", "{}"))
+except Exception:
+    print("Usage: snapshot parse failed")
+    raise SystemExit(0)
+
+insights = snap.get("insights") or {}
+summary = insights.get("summary") or {}
+providers = snap.get("providers") or {}
+
+def fmt_int(value):
+    try:
+        value = int(value or 0)
+    except Exception:
+        value = 0
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+print("Usage")
+print("-----")
+if summary:
+    if summary.get("top_provider"):
+        print(f"top provider: {summary.get('top_provider')}")
+    if summary.get("top_model"):
+        print(f"top model: {summary.get('top_model')}")
+    if summary.get("total_tokens") is not None:
+        print(f"total tokens: {fmt_int(summary.get('total_tokens'))}")
+    if summary.get("estimated_cost_usd") is not None:
+        print(f"estimated cost: ${float(summary.get('estimated_cost_usd') or 0):.2f}")
+    if summary.get("cache_hit_percent") is not None:
+        print(f"cache hit: {float(summary.get('cache_hit_percent') or 0):.1f}%")
+else:
+    print(f"insights: {insights.get('status') or 'unavailable'}")
+
+print()
+print(f"{'provider':<8} {'today':<10} {'week':<10} {'month':<10} {'status':<10}")
+for provider in ("codex", "claude", "gemini"):
+    pdata = providers.get(provider) or {}
+    tokens = pdata.get("tokens") or {}
+    print(
+        f"{provider:<8} "
+        f"{fmt_int(tokens.get('today')):<10} "
+        f"{fmt_int(tokens.get('week')):<10} "
+        f"{fmt_int(tokens.get('month')):<10} "
+        f"{(pdata.get('status') or 'missing'):<10}"
+    )
+PY
+}
+
+repo_context() {
+  parse_repo_only "$@"
+
+  echo "Repository Context"
+  echo "=================="
+  echo "repo: $repo"
+  echo "route: $(agentcat_route_choice 2>/dev/null || echo unknown)"
+  echo
+
+  if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local branch root dirty
+    branch="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+    root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || true)"
+    dirty="$(git -C "$repo" status --short 2>/dev/null | wc -l | tr -d ' ')"
+    echo "git: yes"
+    echo "branch: ${branch:-detached}"
+    echo "root: ${root:-$repo}"
+    echo "changed files: $dirty"
+  else
+    echo "git: no"
+  fi
+
+  echo
+  echo "Files"
+  echo "-----"
+  find "$repo" \
+    -path "$repo/.git" -prune -o \
+    -path "$repo/.omk" -prune -o \
+    -path "$repo/node_modules" -prune -o \
+    -type f -print 2>/dev/null \
+    | wc -l \
+    | awk '{ print "tracked-ish files: " $1 }'
+
+  echo
+  echo "Detected Surfaces"
+  echo "-----------------"
+  [[ -f "$repo/package.json" ]] && echo "node: package.json"
+  [[ -f "$repo/Cargo.toml" ]] && echo "rust: Cargo.toml"
+  [[ -f "$repo/pyproject.toml" ]] && echo "python: pyproject.toml"
+  [[ -f "$repo/Package.swift" ]] && echo "swift: Package.swift"
+  [[ -f "$repo/project.yml" ]] && echo "xcodegen: project.yml"
+  [[ -f "$repo/README.md" ]] && echo "docs: README.md"
+  [[ -d "$repo/tests" ]] && echo "tests: tests/"
+
+  if [[ -f "$repo/package.json" ]]; then
+    echo
+    echo "npm scripts"
+    echo "-----------"
+    python3 - "$repo/package.json" <<'PY' 2>/dev/null || true
+import json
+import sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+scripts = data.get("scripts") or {}
+for key in sorted(scripts):
+    print(f"{key}: {scripts[key]}")
+PY
+  fi
+}
+
+repo_diff() {
+  parse_repo_only "$@"
+
+  echo "Git Diff"
+  echo "========"
+  echo "repo: $repo"
+  echo
+
+  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "not a git repository"
+    return 0
+  fi
+
+  echo "status"
+  echo "------"
+  git -C "$repo" status --short
+  echo
+  echo "diff stat"
+  echo "---------"
+  git -C "$repo" diff --stat || true
+  echo
+  echo "staged diff stat"
+  echo "----------------"
+  git -C "$repo" diff --cached --stat || true
+}
+
+tasks_file_for_repo() {
+  local repo_path="$1"
+  echo "$repo_path/.omk/tasks.tsv"
+}
+
+tasks_list() {
+  parse_repo_only "$@"
+  local file
+  file="$(tasks_file_for_repo "$repo")"
+  if [[ ! -f "$file" ]]; then
+    echo "no tasks"
+    return 0
+  fi
+  printf '%-4s %-10s %-20s %s\n' "id" "status" "created" "task"
+  awk -F '\t' '{ printf "%-4s %-10s %-20s %s\n", $1, $2, $3, $4 }' "$file"
+}
+
+task_command() {
+  parse_repo_only "$@"
+  local action="${extra_args[0]:-list}"
+  local file id task_text tmp
+  file="$(tasks_file_for_repo "$repo")"
+  mkdir -p "$(dirname "$file")"
+
+  case "$action" in
+    list|ls)
+      tasks_list --repo "$repo"
+      ;;
+    add)
+      local task_parts=("${extra_args[@]:1}")
+      task_text="${task_parts[*]}"
+      task_text="$(trim "$task_text")"
+      [[ -n "$task_text" ]] || die "usage: omk task --repo PATH add TASK"
+      if [[ -f "$file" ]]; then
+        id="$(awk -F '\t' 'BEGIN { max=0 } { if ($1+0 > max) max=$1+0 } END { print max+1 }' "$file")"
+      else
+        id="1"
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$id" "open" "$(now_utc)" "$task_text" >>"$file"
+      echo "task added: $id"
+      ;;
+    done|close)
+      id="${extra_args[1]:-}"
+      [[ -n "$id" ]] || die "usage: omk task --repo PATH done ID"
+      [[ -f "$file" ]] || die "no tasks"
+      tmp="$file.tmp"
+      awk -F '\t' -v OFS='\t' -v id="$id" '{ if ($1 == id) $2="done"; print }' "$file" >"$tmp"
+      mv "$tmp" "$file"
+      echo "task done: $id"
+      ;;
+    *)
+      die "unknown task action: $action"
+      ;;
+  esac
 }
 
 prepare_run_dir() {
@@ -1158,6 +1373,12 @@ Slash commands:
   /agents               Refresh agent status, usage, and auto route
   /route                Show the current auto route
   /connect              Install/check Agent Cat Connectors
+  /context              Show repo branch, scripts, surfaces, and route
+  /diff                 Show git status and diff stats
+  /cost                 Show Agent Cat usage/cost summary
+  /tasks                List local .omk task queue
+  /task TASK            Add a task to the local .omk task queue
+  /done ID              Mark a task done
   /auto TASK            Auto-route a task by Agent Cat quota/availability
   /run TASK             Run one task through Claude + Gemini + Codex
   /claude TASK          Run a direct Claude executor task
@@ -1182,6 +1403,8 @@ Examples:
   /mode cockpit
   build the admin audit view with tests
   /advise review the safest migration path before coding
+  /context
+  /task write a regression test
 EOF
 }
 
@@ -1315,6 +1538,27 @@ interactive_shell() {
         /connect)
           ensure_agentcat_connectors
           agentcat_status_table
+          ;;
+        /context)
+          repo_context --repo "$shell_repo"
+          ;;
+        /diff)
+          repo_diff --repo "$shell_repo"
+          ;;
+        /cost|/usage)
+          ensure_agentcat_connectors || true
+          agentcat_cost_report
+          ;;
+        /tasks)
+          tasks_list --repo "$shell_repo"
+          ;;
+        /task)
+          [[ -n "$rest" ]] || { echo "usage: /task TASK" >&2; continue; }
+          task_command --repo "$shell_repo" add "$rest"
+          ;;
+        /done)
+          [[ -n "$rest" ]] || { echo "usage: /done ID" >&2; continue; }
+          task_command --repo "$shell_repo" done "$rest"
           ;;
         /auto)
           [[ -n "$rest" ]] || { echo "usage: /auto TASK" >&2; continue; }
@@ -1464,6 +1708,27 @@ main() {
       shift
       ensure_agentcat_connectors
       agentcat_status_table "$@"
+      ;;
+    context)
+      shift
+      repo_context "$@"
+      ;;
+    diff)
+      shift
+      repo_diff "$@"
+      ;;
+    cost|usage)
+      shift
+      ensure_agentcat_connectors || true
+      agentcat_cost_report "$@"
+      ;;
+    tasks)
+      shift
+      tasks_list "$@"
+      ;;
+    task)
+      shift
+      task_command "$@"
       ;;
     tools)
       shift
