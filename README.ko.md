@@ -234,6 +234,10 @@ omk cockpit --repo ~/work/app "테스트와 노트 포함해서 기능 출시해
 
 ## 인터랙티브 셸
 
+<p align="center">
+  <img src="assets/omk-shell.png" alt="omk 인터랙티브 셸 — 컨덕터가 계획하고 codex에 위임하며 라이브 워커 보드를 스트리밍하고 테스트로 검증" width="660" />
+</p>
+
 인자 없이 `omk`를 실행하면 작은 REPL이 뜹니다. 헤더에 실시간 에이전트 상태가 같이 보입니다.
 
 ```text
@@ -294,6 +298,38 @@ $ omk
 ---
 
 ## 모드
+
+### `omk conduct` — 멀티 에이전트 컨덕터
+
+대표 모드입니다. 네이티브 `claude` 세션이 **컨덕터**가 되어 직접 파일을 고치지 않고, 작업을 계획한 뒤 각 조각을 워커 CLI에 위임합니다 — 구현은 `codex`, 추론·리뷰는 `claude`, 잡일·검색은 `gemini`. 매 턴 엄격한 JSON 엔벌로프를 돌려주고, `omk`는 그걸 라이브 화면으로 그립니다.
+
+```bash
+omk conduct --repo ~/work/app "관리자 액션에 감사 로그 추가하고 검증해줘"
+```
+
+Claude Code처럼 느껴지게 하는 것들:
+
+- **라이브 플랜 체크리스트** — 컨덕터가 `☐ / ◐ / ☑` 플랜을 유지하며 매 턴 갱신합니다.
+- **스트리밍 워커** — 각 위임이 경과 시간·스트림 바이트·현재 활동(편집 중인 파일, 실행한 명령)을 보여주는 애니메이션 상태 줄로 표시됩니다. 멈춰 있는 대기 줄이 아닙니다.
+- **실제 diff 인식** — 위임 라운드마다 컨덕터에게 워커가 만든 *실제* `git diff`를 먹입니다(말로 한 보고가 아니라). 그래서 빈 변경·잘못된 변경을 잡아냅니다.
+- **검증 게이트** — 변경된 리포에서 done을 선언하기 전에 프로젝트 자체 테스트/빌드(`npm test`, `cargo test`, `go test`, `make test`)를 돌리고 결과를 되먹입니다. 검증 안 된 작업을 조용히 "완료"라고 하지 않습니다.
+- **병렬 격리** — 여러 워커를 동시에 보낼 때 각자 일회용 `git worktree`에서 실행하고 변경을 병합합니다. 동시 에이전트가 서로 충돌하지 않습니다.
+- **요란한 실패** — 워커 타임아웃·크래시·쿼터 오류가 즉시 표면화됩니다.
+
+매 턴의 플랜·diff(`turn-N.diff`)·워커 출력·세션 id가 `.omk/runs/<run>/` 아래에 남아, 실행이 완전히 감사 가능하고 재개 가능합니다.
+
+인터랙티브 셸에서는 기본 `auto`/`conduct` 모드의 평문 작업이 컨덕터로 들어갑니다. (커맨드라인의 `omk "작업"`은 여전히 단일 실행자 `omk auto`를 씁니다 — 아래 참고.)
+
+조절값: `OMK_CONDUCT_MAX_TURNS`, `OMK_CONDUCT_CONCURRENCY`, `OMK_CONDUCT_VERIFY=0`(게이트 생략), `OMK_CONDUCT_WORKTREES=0`(리포에서 직접 실행).
+
+### `omk resume` — 이전 컨덕터 실행 이어가기
+
+컨덕터 실행은 `claude` 세션 id와 턴 기록을 저장합니다. `omk resume`는 같은 세션으로 이어서, 현재 리포 diff를 컨덕터에 다시 보여주며 진행합니다.
+
+```bash
+omk resume --repo ~/work/app            # 최근 실행 재개
+omk resume --repo ~/work/app 2026-05-30T17-15-26Z-build-the-feature
+```
 
 ### `omk auto` — 쿼터 기반 라우팅
 
@@ -430,6 +466,8 @@ omk                                      # 인터랙티브 셸
 omk "task"                               # auto 모드 단발 실행
 omk shell    [--repo PATH]               # 특정 워크스페이스용 셸
 
+omk conduct  [--repo PATH] "task"        # 멀티 에이전트 컨덕터 (계획/위임/diff/검증)
+omk resume   [--repo PATH] [run|latest]  # 이전 컨덕터 실행 재개
 omk auto     [--repo PATH] "task"        # 쿼터 기반 라우팅
 omk run      [--repo PATH] "task"        # 풀 3-레인 파이프라인
 omk claude   [--repo PATH] "task"        # Claude 직접 실행

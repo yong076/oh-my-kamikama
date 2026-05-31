@@ -10,6 +10,8 @@ Usage:
   omk "task"
   omk shell [--repo PATH]
   omk auto [--repo PATH] "task"
+  omk conduct [--repo PATH] "task"
+  omk resume [--repo PATH] [run-id|latest]
   omk run [--repo PATH] "task"
   omk claude [--repo PATH] "task"
   omk gemini [--repo PATH] "task"
@@ -101,7 +103,7 @@ cmd_version() {
 }
 
 status() {
-  echo "oh-my-kamikama $VERSION"
+  echo "oh-my-kamisama $VERSION"
   echo "======================"
   cmd_version claude
   cmd_version codex
@@ -798,7 +800,7 @@ task_command() {
       ;;
     add)
       local task_parts=("${extra_args[@]:1}")
-      task_text="${task_parts[*]}"
+      task_text="${task_parts[*]:-}"
       task_text="$(trim "$task_text")"
       [[ -n "$task_text" ]] || die "usage: omk task --repo PATH add TASK"
       if [[ -f "$file" ]]; then
@@ -1268,6 +1270,49 @@ job_id_from_dir() {
   basename "$1"
 }
 
+# Resolve a conductor run directory (one that has a session.json) for resume.
+resolve_resume_dir() {
+  local repo_path="$1"
+  local token="${2:-latest}"
+  local root="$repo_path/.omk/runs"
+  [[ -d "$root" ]] || return 1
+
+  if [[ "$token" != "latest" && -d "$root/$token" && -f "$root/$token/session.json" ]]; then
+    echo "$root/$token"
+    return 0
+  fi
+
+  local latest=""
+  while IFS= read -r d; do
+    [[ -f "$d/session.json" ]] && latest="$d"
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d | sort)
+  [[ -n "$latest" ]] || return 1
+  echo "$latest"
+}
+
+# Run the conductor in-process (no exec) — used by the bash fallback shell.
+run_conduct_inline() {
+  local repo_path="$1"
+  local task_text="$2"
+  local conduct_js
+  conduct_js="$(omk_script_dir)/omk-conduct.js"
+  [[ -f "$conduct_js" ]] || { echo "conductor not found: $conduct_js" >&2; return 1; }
+  require_cmd node
+  node "$conduct_js" --repo "$repo_path" "$task_text"
+}
+
+# Resume the latest conductor run in-process (bash fallback shell).
+resume_conduct_inline() {
+  local repo_path="$1"
+  local token="${2:-latest}"
+  local conduct_js dir
+  conduct_js="$(omk_script_dir)/omk-conduct.js"
+  [[ -f "$conduct_js" ]] || { echo "conductor not found: $conduct_js" >&2; return 1; }
+  require_cmd node
+  dir="$(resolve_resume_dir "$repo_path" "$token")" || { echo "no resumable run found" >&2; return 1; }
+  node "$conduct_js" --repo "$repo_path" --resume-dir "$dir"
+}
+
 bg_run() {
   parse_repo_and_task "$@"
 
@@ -1292,6 +1337,11 @@ bg_run() {
   cat >"$job_dir/run.sh" <<EOF
 #!/usr/bin/env bash
 set +e
+kill_tree() {
+  local p="\$1" child
+  for child in \$(pgrep -P "\$p" 2>/dev/null); do kill_tree "\$child"; done
+  kill "\$p" 2>/dev/null
+}
 finish_job() {
   code="\${1:-\$?}"
   if [[ ! -f $job_dir_q/exit_code ]]; then
@@ -1304,10 +1354,13 @@ finish_job() {
     fi
   fi
 }
+# Run the pipeline in the background and wait, so a TERM/INT reaches us promptly
+# (a foreground child would defer the trap) and we can tear down the whole tree.
+$self_q run --repo $repo_q $task_q >$job_dir_q/stdout.log 2>$job_dir_q/stderr.log &
+child=\$!
 trap 'finish_job \$?' EXIT
-trap 'finish_job 143; exit 143' HUP INT TERM
-
-$self_q run --repo $repo_q $task_q >$job_dir_q/stdout.log 2>$job_dir_q/stderr.log
+trap 'kill_tree \$child; finish_job 143; exit 143' HUP INT TERM
+wait "\$child"
 code="\$?"
 printf '%s\n' "\$code" >$job_dir_q/exit_code
 date -u '+%Y-%m-%dT%H-%M-%SZ' >$job_dir_q/finished.txt
@@ -1494,6 +1547,19 @@ tail_job() {
   tail -n 80 -f "$job_dir/stdout.log" "$job_dir/stderr.log"
 }
 
+# Kill a process and all of its descendants (portable: pgrep on macOS/Linux).
+# The supervisor pid alone is not enough — the real claude/codex/gemini workers
+# are grandchildren and would be orphaned by a plain `kill` of the supervisor.
+kill_tree() {
+  local p="$1"
+  local sig="${2:-TERM}"
+  local child
+  for child in $(pgrep -P "$p" 2>/dev/null || true); do
+    kill_tree "$child" "$sig"
+  done
+  kill "-$sig" "$p" 2>/dev/null || true
+}
+
 kill_job() {
   parse_repo_only "$@"
   local token="${extra_args[0]:-}"
@@ -1502,10 +1568,10 @@ kill_job() {
   job_dir="$(resolve_job_dir "$repo" "$token")"
   pid="$(cat "$job_dir/pid" 2>/dev/null || true)"
   [[ -n "$pid" ]] || die "job has no pid"
-  kill "$pid"
+  kill_tree "$pid" TERM
   printf '%s\n' "killed" >"$job_dir/status"
   now_utc >"$job_dir/finished.txt"
-  echo "killed $(job_id_from_dir "$job_dir") pid=$pid"
+  echo "killed $(job_id_from_dir "$job_dir") pid=$pid (and descendants)"
 }
 
 shell_help() {
@@ -1518,8 +1584,8 @@ Slash commands:
   /help                 Show this help
   /exit                 Leave the shell
   /repo [PATH]          Show or change target repository
-  /mode [MODE]          Show or set default mode: auto, run, claude, gemini,
-                        advise, bg, cockpit, cmux
+  /mode [MODE]          Show or set default mode: auto, conduct, run, claude,
+                        gemini, advise, bg, cockpit, cmux
   /agents               Refresh agent status, usage, and auto route
   /refresh              Redraw the launch screen
   /screen               Show the compact status panel
@@ -1532,6 +1598,8 @@ Slash commands:
   /task TASK            Add a task to the local .omk task queue
   /done ID              Mark a task done
   /auto TASK            Auto-route a task by Agent Cat quota/availability
+  /conduct TASK         Run the multi-agent conductor loop
+  /resume [run|latest]  Resume a previous conductor run
   /run TASK             Run one task through Claude + Gemini + Codex
   /claude TASK          Run a direct Claude executor task
   /gemini TASK          Run a direct Gemini executor task
@@ -1575,6 +1643,9 @@ shell_run_task() {
     auto)
       run_auto --repo "$repo_path" "$task_text" || status=$?
       ;;
+    conduct)
+      run_conduct_inline "$repo_path" "$task_text" || status=$?
+      ;;
     run)
       run_pipeline run --repo "$repo_path" "$task_text" || status=$?
       ;;
@@ -1611,7 +1682,7 @@ interactive_shell() {
   local shell_repo="$repo"
   local shell_mode="${OMK_SHELL_MODE:-auto}"
   case "$shell_mode" in
-    auto|run|claude|gemini|advise|bg|cockpit|cmux) ;;
+    auto|conduct|run|claude|gemini|advise|bg|cockpit|cmux) ;;
     *) shell_mode="auto" ;;
   esac
 
@@ -1651,7 +1722,7 @@ interactive_shell() {
       fi
 
       case "$cmd" in
-        /help|/?)
+        /help|'/?')
           shell_help
           ;;
         /exit|/quit)
@@ -1676,14 +1747,14 @@ interactive_shell() {
             echo "$shell_mode"
           else
             case "$rest" in
-              auto|run|claude|gemini|advise|bg|cockpit|cmux)
+              auto|conduct|run|claude|gemini|advise|bg|cockpit|cmux)
                 shell_mode="$rest"
                 clear 2>/dev/null || true
                 shell_banner "$shell_repo" "$shell_mode"
                 ;;
               *)
                 echo "unknown mode: $rest" >&2
-                echo "valid modes: auto, run, claude, gemini, advise, bg, cockpit, cmux" >&2
+                echo "valid modes: auto, conduct, run, claude, gemini, advise, bg, cockpit, cmux" >&2
                 ;;
             esac
           fi
@@ -1728,6 +1799,13 @@ interactive_shell() {
         /auto)
           [[ -n "$rest" ]] || { echo "usage: /auto TASK" >&2; continue; }
           shell_run_task auto "$shell_repo" "$rest"
+          ;;
+        /conduct)
+          [[ -n "$rest" ]] || { echo "usage: /conduct TASK" >&2; continue; }
+          shell_run_task conduct "$shell_repo" "$rest"
+          ;;
+        /resume)
+          resume_conduct_inline "$shell_repo" "${rest:-latest}" || true
           ;;
         /run)
           [[ -n "$rest" ]] || { echo "usage: /run TASK" >&2; continue; }
@@ -1820,6 +1898,31 @@ main() {
     auto)
       shift
       run_auto "$@"
+      ;;
+    conduct)
+      shift
+      parse_repo_and_task "$@"
+      local conduct_js
+      conduct_js="$(omk_script_dir)/omk-conduct.js"
+      [[ -f "$conduct_js" ]] || die "conductor not found: $conduct_js"
+      require_cmd node
+      exec node "$conduct_js" --repo "$repo" "$task"
+      ;;
+    resume)
+      shift
+      parse_repo_only "$@"
+      local conduct_js token dir
+      conduct_js="$(omk_script_dir)/omk-conduct.js"
+      [[ -f "$conduct_js" ]] || die "conductor not found: $conduct_js"
+      require_cmd node
+      token="${extra_args[0]:-latest}"
+      dir="$(resolve_resume_dir "$repo" "$token")" || die "no resumable run found in $repo/.omk/runs (token: $token)"
+      exec node "$conduct_js" --repo "$repo" --resume-dir "$dir"
+      ;;
+    _rundir)
+      shift
+      parse_repo_and_task "$@"
+      prepare_run_dir "$repo" "$task"
       ;;
     run)
       shift

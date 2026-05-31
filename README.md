@@ -237,6 +237,10 @@ omk cockpit --repo ~/work/app "ship the feature with tests and notes"
 
 ## Interactive shell
 
+<p align="center">
+  <img src="assets/omk-shell.png" alt="omk interactive shell — the conductor planning, delegating to codex, streaming a live worker board, and verifying with the test suite" width="660" />
+</p>
+
 With no arguments in an interactive terminal, `omk` opens a small REPL with a Claude-Code-style launch screen and live agent status:
 
 ```text
@@ -273,7 +277,10 @@ readline fallback.
 
 | Command | What it does |
 |---|---|
+| `/conduct TASK` | Run the multi-agent conductor loop (plan, delegate, diff, verify) |
+| `/resume [run\|latest]` | Resume a previous conductor run |
 | `/mode auto` | Choose the executor from Agent Cat quota/availability |
+| `/mode conduct` | Make plain tasks run the conductor |
 | `/mode run` | Full Claude + Gemini + Codex pipeline |
 | `/mode claude` | Direct Claude executor |
 | `/mode gemini` | Direct Gemini executor |
@@ -312,6 +319,38 @@ $ omk
 ---
 
 ## Modes
+
+### `omk conduct` — the multi-agent conductor
+
+The headline mode. A native `claude` session becomes the **conductor**: it never edits files itself — it plans the work, delegates each piece to a worker CLI (`codex` to implement, `claude` to reason/review, `gemini` for grunt work/search), then synthesizes the results and decides the next step. It returns a strict JSON envelope each turn, which `omk` turns into a live surface.
+
+```bash
+omk conduct --repo ~/work/app "add an audit log to the admin actions and verify it"
+```
+
+What makes it feel like Claude Code:
+
+- **Live plan checklist** — the conductor maintains an evolving `☐ / ◐ / ☑` plan you watch update each turn.
+- **Streaming workers** — each delegation shows an animated status line with elapsed time, bytes streamed, and the worker's current activity (the file it's editing, the command it ran) instead of a frozen wait.
+- **Real diff awareness** — after every delegation round the conductor is fed the *actual* `git diff` the workers produced (not just their prose claim), so it reasons over reality and catches no-op or wrong edits.
+- **Verification gate** — before it declares the task done on a changed repo, `omk` runs the project's own tests/build (`npm test`, `cargo test`, `go test`, or a `make test` target) and feeds the result back. It won't quietly call unverified work "done."
+- **Parallel isolation** — when the conductor dispatches several writers at once, each runs in its own throwaway `git worktree` and the changes are merged back, so concurrent agents can't stomp each other.
+- **Loud failures** — a worker timeout, crash, or quota error is surfaced the instant it happens, not buried.
+
+Every turn, the plan, the diff (`turn-N.diff`), each worker's output, and the session id are written under `.omk/runs/<run>/`, so a run is fully auditable — and resumable.
+
+In the interactive shell, a plain task in the default `auto`/`conduct` mode runs the conductor. (`omk "task"` from the command line still uses single-executor `omk auto` — see below.)
+
+Tunables: `OMK_CONDUCT_MAX_TURNS`, `OMK_CONDUCT_CONCURRENCY`, `OMK_CONDUCT_VERIFY=0` (skip the gate), `OMK_CONDUCT_WORKTREES=0` (run in-repo).
+
+### `omk resume` — continue a previous conductor run
+
+Every conductor run persists its `claude` session id and turn history. `omk resume` picks up where you left off — same session, appended turns, with the current repo diff replayed to the conductor.
+
+```bash
+omk resume --repo ~/work/app            # resume the latest run
+omk resume --repo ~/work/app 2026-05-30T17-15-26Z-build-the-feature
+```
 
 ### `omk auto` — quota-aware routing
 
@@ -448,6 +487,8 @@ omk                                      # interactive shell
 omk "task"                               # one-shot in auto mode
 omk shell    [--repo PATH]               # explicit shell for a workspace
 
+omk conduct  [--repo PATH] "task"        # multi-agent conductor (plan/delegate/diff/verify)
+omk resume   [--repo PATH] [run|latest]  # resume a previous conductor run
 omk auto     [--repo PATH] "task"        # quota-aware routing
 omk run      [--repo PATH] "task"        # full three-lane pipeline
 omk claude   [--repo PATH] "task"        # direct Claude executor

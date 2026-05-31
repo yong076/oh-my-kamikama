@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 const { spawn, spawnSync } = require("child_process");
+const conductor = require("./omk-conduct.js");
 
 const root = path.resolve(__dirname, "..");
 const omk = path.join(__dirname, "omk");
@@ -21,8 +22,19 @@ function argValue(name, fallback) {
 
 let repo = path.resolve(argValue("--repo", process.cwd()));
 let mode = argValue("--mode", process.env.OMK_SHELL_MODE || "auto");
-const validModes = new Set(["auto", "run", "claude", "gemini", "advise", "bg", "cockpit", "cmux"]);
+const validModes = new Set(["auto", "conduct", "run", "claude", "gemini", "advise", "bg", "cockpit", "cmux"]);
 if (!validModes.has(mode)) mode = "auto";
+
+// Conductor wiring. ttyPicker is an arrow-key picker installed by the raw-mode
+// loop; conductorState.interrupt is set while a conductor turn is running so a
+// keypress (Esc/Ctrl+C) can stop it. Both stay null outside a TTY conductor run.
+let ttyPicker = null;
+let pickerActive = false;
+const conductorState = { interrupt: null };
+
+function rawActive() {
+  return !!(process.stdin.isTTY && rawModeWanted);
+}
 const promptText = process.env.OMK_ASCII === "1" ? "> " : "🐱 ";
 const continuationPromptText = process.env.OMK_ASCII === "1" ? "| " : "│ ";
 let rawModeWanted = false;
@@ -35,9 +47,51 @@ const theme = {
   green: "\x1b[32m",
   magenta: "\x1b[35m",
   yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  brightCyan: "\x1b[96m",
+  brightMagenta: "\x1b[95m",
   inputBg: "\x1b[48;5;236m",
   inputFg: "\x1b[38;5;252m",
 };
+
+const SLASH_COMMANDS = [
+  ["/help", "show help"],
+  ["/shortcuts", "keyboard shortcuts"],
+  ["/exit", "leave the shell"],
+  ["/clear", "redraw launch screen"],
+  ["/repo", "show or change target repository"],
+  ["/mode", "set default mode"],
+  ["/agents", "refresh detailed agent status"],
+  ["/refresh", "redraw the launch screen"],
+  ["/intro", "replay the animated intro"],
+  ["/screen", "compact status panel"],
+  ["/route", "show current auto route"],
+  ["/connect", "install/check Agent Cat Connectors"],
+  ["/context", "repo branch, scripts, surfaces"],
+  ["/diff", "git status and diff stats"],
+  ["/cost", "Agent Cat usage/cost summary"],
+  ["/tasks", "list local task queue"],
+  ["/task", "add a local task"],
+  ["/done", "mark a local task done"],
+  ["/auto", "auto-route a task"],
+  ["/conduct", "run the multi-agent conductor"],
+  ["/resume", "resume a previous conductor run"],
+  ["/run", "Claude + Gemini advisors then Codex"],
+  ["/claude", "direct Claude executor"],
+  ["/gemini", "direct Gemini executor"],
+  ["/advise", "advisors only"],
+  ["/bg", "start background conductor job"],
+  ["/cockpit", "open cmux cockpit"],
+  ["/ps", "list background jobs"],
+  ["/logs", "print job logs"],
+  ["/tail", "follow job logs"],
+  ["/watch", "watch job status"],
+  ["/kill", "stop a background job"],
+  ["/tools", "show detected tools"],
+  ["/status", "omk and provider versions"],
+  ["/doctor", "check required CLIs"],
+  ["/!", "run a shell command in the repo"],
+];
 
 function color(name, value) {
   if (!useAnsi) return value;
@@ -187,24 +241,159 @@ function statusLine(agents) {
   console.log(color("dim", parts.join("  ")));
 }
 
+let cachedAgents = null;
+
+// ---------------------------------------------------------------------------
+// Animated intro — "Kamisama descends". A truecolor shimmer sweeps the title
+// while ✻ stars twinkle in. TTY + color only; skipped under NO_COLOR / OMK_ASCII
+// / OMK_NO_INTRO so tests and pipes stay clean.
+// ---------------------------------------------------------------------------
+
+const truecolor = useAnsi && (process.env.COLORTERM === "truecolor" || process.env.COLORTERM === "24bit");
+
+function rgb(r, g, b) {
+  return `\x1b[38;2;${r}\x3b${g}\x3b${b}m`;
+}
+
+function lerp(a, b, t) {
+  return Math.round(a + (b - a) * t);
+}
+
+// Magenta → pink → cyan ramp, with a moving white-hot shimmer band.
+function gradientText(text, phase) {
+  const stops = [
+    [168, 85, 247], // violet
+    [236, 72, 153], // pink
+    [56, 189, 248], // cyan
+  ];
+  const chars = Array.from(text);
+  let out = "";
+  for (let i = 0; i < chars.length; i += 1) {
+    const t = chars.length > 1 ? i / (chars.length - 1) : 0;
+    const seg = t * (stops.length - 1);
+    const idx = Math.min(stops.length - 2, Math.floor(seg));
+    const local = seg - idx;
+    let r = lerp(stops[idx][0], stops[idx + 1][0], local);
+    let g = lerp(stops[idx][1], stops[idx + 1][1], local);
+    let b = lerp(stops[idx][2], stops[idx + 1][2], local);
+    // White-hot shimmer: a soft band centered on `phase` (0..1) sweeping across.
+    const dist = Math.abs(t - phase);
+    const glow = Math.max(0, 1 - dist * 6);
+    if (glow > 0) {
+      r = lerp(r, 255, glow);
+      g = lerp(g, 255, glow);
+      b = lerp(b, 255, glow);
+    }
+    out += truecolor ? `${rgb(r, g, b)}${chars[i]}` : `${color("brightMagenta", chars[i])}`;
+  }
+  return out + (useAnsi ? theme.reset : "");
+}
+
+const STAR_GLYPHS = ["✦", "✧", "✺", "✷", "·", "✵"];
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function playIntro() {
+  if (!useAnsi || process.env.OMK_NO_INTRO === "1" || process.env.OMK_ASCII === "1") return;
+  if (!process.stdout.isTTY) return;
+
+  const title = "Oh My Kamisama";
+  const width = terminalWidth();
+  const cols = Math.min(width, 78);
+  const rows = 7;
+  console.clear();
+
+  // Deterministic pseudo-stars (no Math.random dependency on env).
+  const stars = [];
+  for (let i = 0; i < 26; i += 1) {
+    const x = (i * 37 + 11) % cols;
+    const y = (i * 17 + 3) % rows;
+    stars.push({ x, y, born: (i * 53) % 9, glyph: STAR_GLYPHS[i % STAR_GLYPHS.length] });
+  }
+
+  const titlePad = Math.max(0, Math.floor((cols - title.length) / 2));
+  const hide = "\x1b[?25l";
+  const show = "\x1b[?25h";
+  process.stdout.write(hide);
+
+  const frames = 16;
+  try {
+    for (let f = 0; f < frames; f += 1) {
+      const phase = f / (frames - 1); // 0..1 shimmer sweep
+      const grid = Array.from({ length: rows }, () => Array(cols).fill(" "));
+
+      // Twinkle stars in.
+      for (const s of stars) {
+        if (f >= s.born) {
+          const tw = (f + s.x) % 4;
+          const g = tw === 0 ? STAR_GLYPHS[2] : tw === 1 ? s.glyph : tw === 2 ? "·" : s.glyph;
+          grid[s.y][s.x] = g;
+        }
+      }
+
+      // Render grid with a dim violet for stars.
+      const starColor = truecolor ? rgb(120, 90, 200) : (theme.magenta || "");
+      let buf = "\x1b[H"; // home
+      for (let y = 0; y < rows; y += 1) {
+        if (y === Math.floor(rows / 2)) {
+          // Title row with shimmer, centered.
+          buf += " ".repeat(titlePad) + gradientText(title, phase);
+          // trailing stars on the title row beyond the title
+          buf += "\n";
+        } else {
+          let line = "";
+          for (let x = 0; x < cols; x += 1) {
+            const ch = grid[y][x];
+            line += ch === " " ? " " : `${starColor}${ch}${useAnsi ? theme.reset : ""}`;
+          }
+          buf += line + "\n";
+        }
+      }
+      // Subtitle fades in over the second half.
+      const sub = "one command · many agents · a suspicious amount of confidence";
+      if (f > frames / 2) {
+        const subPad = Math.max(0, Math.floor((cols - sub.length) / 2));
+        buf += " ".repeat(subPad) + color("dim", sub) + "\n";
+      } else {
+        buf += "\n";
+      }
+      process.stdout.write(buf);
+      await sleep(f < 4 ? 55 : 70);
+    }
+    // Final twinkle flash on the ✻ then settle.
+    for (let i = 0; i < 3; i += 1) {
+      const star = i % 2 === 0 ? (truecolor ? rgb(255, 255, 255) : color("bold", "✻")) : (truecolor ? rgb(168, 85, 247) : "");
+      process.stdout.write(`\x1b[H${star}✻${useAnsi ? theme.reset : ""}`);
+      await sleep(90);
+    }
+  } finally {
+    process.stdout.write(show);
+  }
+  await sleep(120);
+}
+
 function banner() {
   const agents = agentSnapshot();
+  cachedAgents = agents;
   console.clear();
-  const title = ` ${color("bold", "Oh My Kamisama")} ${color("dim", `v${version()}`)} `;
+  const heading = truecolor ? gradientText("Welcome to Oh My Kamisama!", 0.5) : color("bold", "Welcome to Oh My Kamisama!");
+  const title = ` ${color("brightMagenta", "✻")} ${heading} ${color("dim", `v${version()}`)} `;
   console.log(framedLine("╭", title, "╮"));
-  frameRow("repo:  ", shortPath(repo));
-  frameRow("mode:  ", mode);
-  frameRow("route: ", agents.route);
-  frameRow("state: ", agents.activity);
-  rule();
-  frameRow("agents: ", agents.providers);
-  rule();
-  frameRow("try:   ", "describe a task, /mode cockpit, /advise <question>");
-  frameRow("keys:  ", "Enter run  Shift+Enter newline  Ctrl+L redraw");
+  frameRow("", "");
+  frameRow("  ", color("dim", "/help for help, /status for setup, /agents for live"));
+  frameRow("", "");
+  frameRow("  cwd:   ", shortPath(repo));
+  frameRow("  mode:  ", `${color("magenta", mode)}    route: ${color("cyan", agents.route)}    state: ${agents.activity}`);
+  frameRow("  ", color("dim", agents.providers));
   console.log(framedLine("╰", "", "╯"));
-  statusLine(agents);
   console.log("");
-  console.log("type a task, /agents for detail, /context for repo, /exit to quit");
+  console.log(color("dim", " Tips for getting started:"));
+  console.log(color("dim", "  - Run /connect to install Agent Cat Connectors"));
+  console.log(color("dim", "  - Try /mode cockpit for long background work"));
+  console.log(color("dim", "  - Run /advise <question> for advisors only"));
+  console.log(color("dim", "  - Press ? for shortcuts, Ctrl+L to redraw"));
   console.log("");
 }
 
@@ -216,11 +405,21 @@ function printTaskHeader(taskMode, task) {
   console.log(framedLine("╰", "", "╯"));
 }
 
-function printTaskFooter(taskMode, code) {
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}m${s.toString().padStart(2, "0")}s`;
+}
+
+function printTaskFooter(taskMode, code, elapsedMs) {
   const agents = agentSnapshot();
-  const label = code === 0 ? color("green", "done") : color("yellow", `exit ${code}`);
+  cachedAgents = agents;
+  const label = code === 0 ? color("green", "✓ done") : color("yellow", `✗ exit ${code}`);
+  const elapsed = typeof elapsedMs === "number" ? color("dim", `(${formatElapsed(elapsedMs)})`) : "";
   console.log("");
-  console.log(`${label} ${color("dim", taskMode)}  ${color("dim", `mode:${mode} route:${agents.route}`)}`);
+  console.log(`${label} ${color("dim", taskMode)} ${elapsed}  ${color("dim", `mode:${mode} route:${agents.route}`)}`);
   statusLine(agents);
   console.log("");
 }
@@ -234,6 +433,25 @@ function printCompactStatus() {
   rule();
 }
 
+function printShortcuts() {
+  console.log("");
+  console.log(framedLine("╭", ` ${color("bold", "Keyboard shortcuts")} `, "╮"));
+  frameRow("  ", "Enter               submit the current input");
+  frameRow("  ", "Shift+Enter         insert a newline");
+  frameRow("  ", "Meta+Enter          insert a newline");
+  frameRow("  ", "\\ + Enter           continue on next line");
+  frameRow("  ", "↑ / ↓               history previous / next");
+  frameRow("  ", "Ctrl+A / Ctrl+E     jump to start / end of line");
+  frameRow("  ", "Ctrl+U / Ctrl+K     delete to start / end of line");
+  frameRow("  ", "Ctrl+L              redraw the launch screen");
+  frameRow("  ", "Ctrl+C              clear input (twice to exit)");
+  frameRow("  ", "Ctrl+D              exit on empty input");
+  frameRow("  ", "?                   show this overlay (empty input)");
+  frameRow("  ", "/                   open slash command autocomplete");
+  console.log(framedLine("╰", "", "╯"));
+  console.log("");
+}
+
 function printHelp() {
   console.log(`Oh My Kamisama interactive shell
 
@@ -241,11 +459,13 @@ Type a natural-language task and press Enter. The current mode decides how it ru
 
 Slash commands:
   /help                 Show this help
+  /shortcuts            Keyboard shortcuts overlay
   /exit                 Leave the shell
   /repo [PATH]          Show or change target repository
-  /mode [MODE]          Show or set default mode: auto, run, claude, gemini, advise, bg, cockpit, cmux
+  /mode [MODE]          Show or set default mode: auto, conduct, run, claude, gemini, advise, bg, cockpit, cmux
   /agents               Refresh detailed agent status
   /refresh              Redraw the launch screen
+  /intro                Replay the animated intro (OMK_NO_INTRO=1 to disable)
   /clear                Clear/redraw the launch screen
   /screen               Show the compact Claude-Code-style status panel
   /route                Show the current auto route
@@ -256,7 +476,9 @@ Slash commands:
   /tasks                List local .omk task queue
   /task TASK            Add a task to the local .omk task queue
   /done ID              Mark a task done
-  /auto TASK            Auto-route a task
+  /auto TASK            Auto-route a task to a single executor
+  /conduct TASK         Run the multi-agent conductor loop
+  /resume [run|latest]  Resume a previous conductor run (replays its session)
   /run TASK             Run Claude + Gemini advisors, then Codex
   /claude TASK          Run a direct Claude executor task
   /gemini TASK          Run a direct Gemini executor task
@@ -300,8 +522,330 @@ async function runTask(taskMode, task) {
     return;
   }
   printTaskHeader(taskMode, task);
+  const start = Date.now();
   const code = await runInherit([taskMode, "--repo", repo, task]);
-  printTaskFooter(taskMode, code);
+  printTaskFooter(taskMode, code, Date.now() - start);
+}
+
+// ---------------------------------------------------------------------------
+// Conductor live UI. The conductor engine (omk-conduct.js) emits semantic
+// events; here we render a Claude-Code-style live surface: a sticky plan
+// checklist, an animated multi-worker board with live activity, a "thinking"
+// spinner, markdown-rendered narration, and loud error lines. A LiveRegion
+// keeps the animated lines pinned to the bottom while permanent output scrolls
+// above. In non-TTY / non-raw contexts everything degrades to plain lines.
+// ---------------------------------------------------------------------------
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function oneLineJs(text, max) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+function fmtBytes(n) {
+  if (!n) return "";
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${(n / (1024 * 1024)).toFixed(1)}M`;
+}
+
+function truncToWidth(line, width) {
+  if (displayWidth(stripAnsi(line)) <= width) return line;
+  let out = "";
+  let vis = 0;
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === "\x1b") {
+      const m = line.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (m) { out += m[0]; i += m[0].length; continue; }
+    }
+    const ch = line[i];
+    const w = charWidth(ch);
+    if (vis + w > width - 1) break;
+    out += ch;
+    vis += w;
+    i += 1;
+  }
+  return out + "…" + (useAnsi ? theme.reset : "");
+}
+
+// Wrap an ANSI string by display width, breaking on spaces. ANSI escapes are
+// copied verbatim and counted as zero width.
+function wrapAnsiString(s, width) {
+  const lines = [];
+  for (const para of String(s).split("\n")) {
+    let line = "";
+    let lineW = 0;
+    let lastSpace = -1;
+    let i = 0;
+    while (i < para.length) {
+      if (para[i] === "\x1b") {
+        const m = para.slice(i).match(/^\x1b\[[0-9;]*m/);
+        if (m) { line += m[0]; i += m[0].length; continue; }
+      }
+      const ch = para[i];
+      const w = charWidth(ch);
+      if (lineW + w > width && lineW > 0) {
+        if (lastSpace >= 0) {
+          const rest = line.slice(lastSpace + 1);
+          lines.push(line.slice(0, lastSpace));
+          line = rest;
+          lineW = displayWidth(stripAnsi(rest));
+        } else {
+          lines.push(line);
+          line = "";
+          lineW = 0;
+        }
+        lastSpace = -1;
+      }
+      if (ch === " ") lastSpace = line.length;
+      line += ch;
+      lineW += w;
+      i += 1;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+function renderMarkdownInline(text) {
+  let s = String(text);
+  s = s.replace(/`([^`]+)`/g, (_, c) => color("cyan", c));
+  s = s.replace(/\*\*([^*]+)\*\*/g, (_, c) => color("bold", c));
+  s = s.replace(/__([^_]+)__/g, (_, c) => color("bold", c));
+  s = s.replace(/^#{1,6}\s+(.*)$/gm, (_, c) => color("bold", c));
+  s = s.replace(/^(\s*)[-*]\s+/gm, "$1• ");
+  return s;
+}
+
+function sayBlock(text) {
+  const glyph = color("brightMagenta", "✻");
+  const md = renderMarkdownInline(text);
+  const wrapped = wrapAnsiString(md, Math.max(20, terminalWidth() - 2));
+  return wrapped.map((l, i) => (i === 0 ? `${glyph} ${l}` : `  ${l}`)).join("\n");
+}
+
+function planGlyph(status) {
+  return status === "done" ? "☑" : status === "in_progress" ? "◐" : status === "blocked" ? "⚠" : "☐";
+}
+
+function planLine(p) {
+  const g = planGlyph(p.status);
+  if (p.status === "done") return color("green", `  ${g} ${p.title}`);
+  if (p.status === "in_progress") return color("cyan", `  ${g} `) + color("bold", p.title);
+  if (p.status === "blocked") return color("yellow", `  ${g} ${p.title}`);
+  return color("dim", `  ${g} ${p.title}`);
+}
+
+function workerLine(w, frame) {
+  let glyph;
+  let c;
+  if (w.status === "running") { glyph = SPINNER_FRAMES[frame % SPINNER_FRAMES.length]; c = "cyan"; }
+  else if (w.status === "done") { glyph = "✓"; c = "green"; }
+  else if (w.status === "failed") { glyph = "✗"; c = "red"; }
+  else if (w.status === "timeout") { glyph = "⏱"; c = "yellow"; }
+  else { glyph = "○"; c = "dim"; }
+  const meta = [];
+  if (w.ms) meta.push(formatElapsed(w.ms));
+  if (w.bytes) meta.push(fmtBytes(w.bytes));
+  const metaStr = meta.length ? color("dim", " " + meta.join(" ")) : "";
+  const detail = w.activity ? w.activity : (w.status === "queued" ? "queued" : oneLineJs(w.task, 48));
+  return color(c, `  ${glyph} ${w.agent}`) + metaStr + color("dim", "  " + detail);
+}
+
+function spinnerLine(label, frame, startMs) {
+  const g = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
+  const secs = formatElapsed(Date.now() - startMs);
+  return color("brightMagenta", `  ${g} ${label}…`) + color("dim", ` (${secs} · esc to interrupt)`);
+}
+
+// A block of lines pinned to the bottom of the screen. Permanent output prints
+// above it via print(); the live lines are redrawn in place via set().
+function makeLiveRegion() {
+  let lines = [];
+  let rendered = 0;
+  const active = () => rawActive() && process.stdout.isTTY;
+  const clear = () => {
+    if (!active() || rendered === 0) { rendered = 0; return; }
+    process.stdout.write("\r");
+    if (rendered > 1) process.stdout.write(`\x1b[${rendered - 1}A`);
+    process.stdout.write("\x1b[J");
+    rendered = 0;
+  };
+  const paint = () => {
+    if (!active()) { rendered = 0; return; }
+    let out = "";
+    for (let i = 0; i < lines.length; i += 1) {
+      out += "\x1b[K" + lines[i];
+      if (i < lines.length - 1) out += "\r\n";
+    }
+    process.stdout.write(out);
+    rendered = lines.length;
+  };
+  const set = (newLines) => {
+    const nl = (newLines || []).filter(Boolean);
+    if (!active()) { lines = nl; return; }
+    clear();
+    lines = nl;
+    paint();
+  };
+  const print = (text) => {
+    clear();
+    const t = String(text);
+    process.stdout.write((rawActive() ? t.replace(/\n/g, "\r\n") : t) + (rawActive() ? "\r\n" : "\n"));
+    paint();
+  };
+  return { set, print, clear, active };
+}
+
+function buildConductorIo() {
+  const region = makeLiveRegion();
+  let plan = [];
+  let workers = [];
+  let spinner = null;
+  let frame = 0;
+  let timer = null;
+
+  const compose = () => {
+    const out = [];
+    for (const p of plan) out.push(planLine(p));
+    for (const w of workers) out.push(workerLine(w, frame));
+    if (spinner && !workers.length) out.push(spinnerLine(spinner.label, frame, spinner.start));
+    const w = Math.max(20, terminalWidth() - 1);
+    return out.map((l) => truncToWidth(l, w));
+  };
+  const repaint = () => region.set(compose());
+
+  const startTimer = () => {
+    if (timer || !region.active()) return;
+    timer = setInterval(() => { frame = (frame + 1) % 100000; repaint(); }, 100);
+    if (timer.unref) timer.unref();
+  };
+  const stopTimerIfIdle = () => {
+    const busy = spinner || workers.some((w) => w.status === "running" || w.status === "queued");
+    if (timer && !busy) { clearInterval(timer); timer = null; }
+  };
+
+  return {
+    print: (s) => region.print(String(s)),
+    dim: (s) => color("dim", String(s)),
+    note: (s) => region.print(color("dim", "· " + s)),
+    error: (s) => region.print(color("red", "✗ " + s)),
+    say: (s) => region.print(sayBlock(String(s))),
+    plan: (items) => { plan = (items || []).slice(); repaint(); },
+    turnStart: (label) => { spinner = { label: label || "Working", start: Date.now() }; startTimer(); repaint(); },
+    turnEnd: () => { spinner = null; stopTimerIfIdle(); repaint(); },
+    delegationsStart: (list) => {
+      workers = (list || []).map((d) => ({ agent: d.agent, model: d.model, task: d.task, status: "queued", ms: 0, bytes: 0, activity: "" }));
+      startTimer();
+      repaint();
+    },
+    delegationUpdate: (i, patch) => { if (workers[i]) { Object.assign(workers[i], patch); repaint(); } },
+    delegationsEnd: () => {
+      const finals = workers;
+      workers = [];
+      region.set(compose());
+      for (const w of finals) region.print(workerLine(w, frame));
+      stopTimerIfIdle();
+      repaint();
+    },
+    ask: async (question, options) => {
+      region.clear();
+      if (ttyPicker) return ttyPicker(question, options);
+      const env = process.env.OMK_CONDUCT_AUTO_ANSWER;
+      if (env) return env;
+      const first = options && options[0];
+      return (first && (first.label || first)) || "";
+    },
+    bindInterrupt: (fn) => { conductorState.interrupt = fn; },
+    close: () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      const finalPlan = plan;
+      plan = []; workers = []; spinner = null;
+      region.set([]);
+      for (const p of finalPlan) region.print(planLine(p));
+    },
+  };
+}
+
+async function runConductorWith(label, runOpts) {
+  printTaskHeader(label, runOpts.task || path.basename(runOpts.resumeDir || ""));
+  const start = Date.now();
+  const io = buildConductorIo();
+  const wasRaw = rawActive();
+  if (process.stdin.isTTY) setRawMode(true);
+  let code = 0;
+  try {
+    const result = await conductor.runConductor({ repo, io, ...runOpts });
+    code = result && result.interrupted ? 130 : 0;
+  } catch (err) {
+    console.error(err && err.stack ? err.stack : String(err));
+    code = 1;
+  } finally {
+    if (io.close) io.close();
+    conductorState.interrupt = null;
+    if (process.stdin.isTTY && !wasRaw) setRawMode(false);
+  }
+  printTaskFooter(label, code, Date.now() - start);
+}
+
+async function runConductorTask(task) {
+  if (!task) return;
+  await runConductorWith("conduct", { task });
+}
+
+async function runConductorResume(token) {
+  const dir = conductor.findResumeDir(repo, token || "latest");
+  if (!dir) {
+    console.error(`omk: no resumable conductor run found in ${shortPath(repo)}/.omk/runs`);
+    return;
+  }
+  await runConductorWith("resume", { resumeDir: dir });
+}
+
+// Arrow-key picker for conductor `ask`. Installed only while a conductor turn is
+// running, so the main input handler is dormant (it early-returns on `running`).
+function makeTtyPicker() {
+  return (question, options) => new Promise((resolve) => {
+    const labels = (options || []).map((o) => (typeof o === "string" ? o : (o && o.label) || String(o)));
+    if (!labels.length) { resolve(""); return; }
+    pickerActive = true;
+    let selected = 0;
+    let rendered = 0;
+
+    const draw = () => {
+      if (rendered > 0) {
+        process.stdout.write(`\x1b[${rendered}A`);
+        process.stdout.write("\x1b[J");
+      }
+      const lines = [];
+      lines.push(`${color("bold", "?")} ${question}`);
+      labels.forEach((label, i) => {
+        const sel = i === selected;
+        lines.push(sel ? `${color("cyan", "❯")} ${color("cyan", label)}` : `  ${label}`);
+      });
+      lines.push(color("dim", "  ↑/↓ select · Enter confirm · Esc cancel"));
+      process.stdout.write(lines.join("\r\n") + "\r\n");
+      rendered = lines.length;
+    };
+
+    const cleanup = () => {
+      process.stdin.off("keypress", onKey);
+      pickerActive = false;
+    };
+
+    const onKey = (_str, key = {}) => {
+      if (!key) return;
+      if (key.name === "up") { selected = (selected - 1 + labels.length) % labels.length; draw(); }
+      else if (key.name === "down") { selected = (selected + 1) % labels.length; draw(); }
+      else if (key.name === "return" || key.name === "enter") { cleanup(); resolve(labels[selected]); }
+      else if (key.name === "escape" || (key.ctrl && key.name === "c")) { cleanup(); resolve("__INTERRUPT__"); }
+    };
+
+    draw();
+    process.stdin.on("keypress", onKey);
+  });
 }
 
 async function handleSlash(line) {
@@ -310,6 +854,10 @@ async function handleSlash(line) {
     case "/help":
     case "/?":
       printHelp();
+      return true;
+    case "/shortcuts":
+    case "/keys":
+      printShortcuts();
       return true;
     case "/exit":
     case "/quit":
@@ -334,12 +882,16 @@ async function handleSlash(line) {
         mode = rest;
         banner();
       } else {
-        console.error("valid modes: auto, run, claude, gemini, advise, bg, cockpit, cmux");
+        console.error("valid modes: auto, conduct, run, claude, gemini, advise, bg, cockpit, cmux");
       }
       return true;
     case "/refresh":
     case "/home":
     case "/clear":
+      banner();
+      return true;
+    case "/intro":
+      await playIntro();
       banner();
       return true;
     case "/agents":
@@ -377,6 +929,13 @@ async function handleSlash(line) {
     case "/done":
       if (!rest) console.error("usage: /done ID");
       else await runInherit(["task", "--repo", repo, "done", rest]);
+      return true;
+    case "/conduct":
+      if (!rest) console.error("usage: /conduct TASK");
+      else await runConductorTask(rest);
+      return true;
+    case "/resume":
+      await runConductorResume(rest);
       return true;
     case "/auto":
     case "/run":
@@ -480,7 +1039,11 @@ async function processLine(raw) {
   if (line.startsWith("/")) {
     return handleSlash(line);
   }
-  await runTask(mode === "cmux" ? "cockpit" : mode, line);
+  if (mode === "auto" || mode === "conduct") {
+    await runConductorTask(line);
+  } else {
+    await runTask(mode === "cmux" ? "cockpit" : mode, line);
+  }
   return true;
 }
 
@@ -566,10 +1129,16 @@ async function readlineLoop() {
   }
 }
 
-function buildInputRows(chars, cursor) {
-  const columns = Math.max(20, process.stdout.columns || 80);
+function computeBoxWidth() {
+  const columns = Math.max(40, process.stdout.columns || 80);
+  // Leave one spare column so a full-width row never hits the right margin and
+  // triggers the terminal's deferred auto-wrap, which desyncs our row math.
+  return Math.min(columns - 1, 100);
+}
+
+function buildInputLines(chars, cursor, innerWidth) {
   const prompt = promptText;
-  const continuation = continuationPromptText;
+  const continuation = "  ";
   const wrapPrompt = " ".repeat(displayWidth(continuation));
   const rows = [];
   let row = prompt;
@@ -602,7 +1171,7 @@ function buildInputRows(chars, cursor) {
     }
 
     const width = charWidth(ch);
-    if (rowWidth + width > columns && rowWidth > prefixWidth) {
+    if (rowWidth + width > innerWidth && rowWidth > prefixWidth) {
       pushRow();
       newRow(wrapPrompt);
     }
@@ -612,12 +1181,63 @@ function buildInputRows(chars, cursor) {
     if (cursor === index + 1) markCursor();
   }
   pushRow();
-  const styledRows = rows.map((value) => inputRowStyle(padInputRow(value, columns)));
-  return {
-    rows: styledRows,
-    cursorRow,
-    cursorCol,
-  };
+  const padded = rows.map((value) => {
+    const visible = displayWidth(stripAnsi(value));
+    return value + " ".repeat(Math.max(0, innerWidth - visible));
+  });
+  return { rows: padded, cursorRow, cursorCol };
+}
+
+function computeSlashPopup(text) {
+  const trimmed = text.replace(/^\s+/, "");
+  if (!trimmed.startsWith("/")) return [];
+  const firstWord = trimmed.split(/\s/, 1)[0].toLowerCase();
+  if (firstWord.length < 2) return [];
+  const matches = SLASH_COMMANDS
+    .filter(([cmd]) => cmd.startsWith(firstWord))
+    .slice(0, 7);
+  if (!matches.length) return [];
+  if (matches.length === 1 && matches[0][0] === firstWord) return [];
+  const maxCmd = Math.max(...matches.map(([c]) => c.length));
+  return matches.map(([cmd, desc]) =>
+    color("dim", "  ") + color("cyan", cmd.padEnd(maxCmd)) + color("dim", `  ${desc}`)
+  );
+}
+
+function buildView(chars, cursor) {
+  const boxWidth = computeBoxWidth();
+  const inner = boxWidth - 4;
+  const top = "╭" + "─".repeat(boxWidth - 2) + "╮";
+  const bottom = "╰" + "─".repeat(boxWidth - 2) + "╯";
+
+  const input = buildInputLines(chars, cursor, inner);
+  const popup = computeSlashPopup(chars.join(""));
+
+  const rows = [];
+  let cursorRow = 0;
+  let cursorCol = 0;
+
+  for (const line of popup) rows.push(line);
+
+  rows.push(top);
+  for (let i = 0; i < input.rows.length; i += 1) {
+    rows.push(`│ ${input.rows[i]} │`);
+    if (i === input.cursorRow) {
+      cursorRow = rows.length - 1;
+      cursorCol = 2 + input.cursorCol;
+    }
+  }
+  rows.push(bottom);
+
+  const agents = cachedAgents || { route: "?" };
+  const left = color("dim", "? for shortcuts");
+  const right = color("dim", `mode:${mode} · route:${agents.route} · ${shortPath(repo)}`);
+  const leftW = displayWidth(stripAnsi(left));
+  const rightW = displayWidth(stripAnsi(right));
+  const pad = Math.max(2, boxWidth - leftW - rightW - 2);
+  rows.push(`  ${left}${" ".repeat(pad)}${right}`);
+
+  return { rows, cursorRow, cursorCol };
 }
 
 async function terminalInputLoop() {
@@ -629,25 +1249,50 @@ async function terminalInputLoop() {
   let historyIndex = 0;
   let running = false;
   let done = false;
+  // Invariant: between renders, the real cursor sits at (pendingCursorRow) within
+  // the block of `renderedRows` lines. render() always normalizes back to the
+  // block's first line before redrawing, so we never accumulate ghost frames.
   let renderedRows = 0;
-  let renderedCursorRow = 0;
+  let pendingCursorRow = 0;
+
+  const climbToTop = () => {
+    // Go from the parked input cursor up to the very first row of the old block.
+    process.stdout.write("\r");
+    if (pendingCursorRow > 0) process.stdout.write(`\x1b[${pendingCursorRow}A`);
+  };
 
   const render = () => {
     if (renderedRows > 0) {
-      process.stdout.write("\r");
-      if (renderedCursorRow > 0) process.stdout.write(`\x1b[${renderedCursorRow}A`);
-      process.stdout.write("\x1b[J");
+      climbToTop();
+      process.stdout.write("\x1b[J"); // erase old block (from first row down)
     }
 
-    const view = buildInputRows(chars, cursor);
-    process.stdout.write(view.rows.join("\n"));
+    const view = buildView(chars, cursor);
+    // Raw mode: each newline needs an explicit carriage return. Clear each line
+    // (\x1b[K) before writing so a shorter line can't leave stale glyphs.
+    let out = "";
+    for (let i = 0; i < view.rows.length; i += 1) {
+      out += "\x1b[K" + view.rows[i];
+      if (i < view.rows.length - 1) out += "\r\n";
+    }
+    process.stdout.write(out);
     renderedRows = view.rows.length;
-    renderedCursorRow = view.cursorRow;
 
-    const rowsBelowCursor = renderedRows - view.cursorRow - 1;
+    // Cursor is at the end of the last row. Move it to the input position.
     process.stdout.write("\r");
-    if (rowsBelowCursor > 0) process.stdout.write(`\x1b[${rowsBelowCursor}A`);
+    const upToCursor = renderedRows - 1 - view.cursorRow;
+    if (upToCursor > 0) process.stdout.write(`\x1b[${upToCursor}A`);
     if (view.cursorCol > 0) process.stdout.write(`\x1b[${view.cursorCol}C`);
+    pendingCursorRow = view.cursorRow;
+  };
+
+  const clearRender = () => {
+    if (renderedRows > 0) {
+      climbToTop();
+      process.stdout.write("\x1b[J");
+      renderedRows = 0;
+      pendingCursorRow = 0;
+    }
   };
 
   const setLine = (value) => {
@@ -659,12 +1304,14 @@ async function terminalInputLoop() {
     if (running) return;
     running = true;
     const raw = chars.join("");
+    // Move from the input cursor down past the whole block, then onto a fresh
+    // line so command output starts cleanly below the (now committed) box.
     process.stdout.write("\r");
-    const rowsBelowCursor = renderedRows - renderedCursorRow - 1;
+    const rowsBelowCursor = renderedRows - pendingCursorRow - 1;
     if (rowsBelowCursor > 0) process.stdout.write(`\x1b[${rowsBelowCursor}B`);
-    process.stdout.write("\n");
+    process.stdout.write("\r\n");
     renderedRows = 0;
-    renderedCursorRow = 0;
+    pendingCursorRow = 0;
     setLine("");
     historyIndex = history.length;
     const normalized = normalizeBackspaces(raw).trim();
@@ -702,11 +1349,36 @@ async function terminalInputLoop() {
 
   setRawMode(true);
   process.stdin.resume();
+  ttyPicker = makeTtyPicker();
   render();
 
+  // Redraw the input box when the terminal is resized so it tracks the new
+  // width instead of staying misaligned until the next keystroke. A running
+  // conductor owns the screen and recomputes width on its own repaint.
+  const onResize = () => {
+    if (done || running) return;
+    clearRender();
+    render();
+  };
+  process.stdout.on("resize", onResize);
+
   return new Promise((resolve) => {
+    const exitLoop = () => {
+      process.stdout.removeListener("resize", onResize);
+      process.stdin.off("keypress", onKeypress);
+      resolve();
+    };
     const onKeypress = (str, key = {}) => {
-      if (done || running) return;
+      if (done) return;
+      if (running) {
+        // A conductor turn owns the screen. The picker (if open) has its own
+        // listener; otherwise Esc/Ctrl+C interrupts the running conductor.
+        if (!pickerActive && conductorState.interrupt &&
+            (key.name === "escape" || (key.ctrl && key.name === "c"))) {
+          conductorState.interrupt();
+        }
+        return;
+      }
 
       if (key.ctrl && key.name === "c") {
         if (chars.length) {
@@ -717,7 +1389,7 @@ async function terminalInputLoop() {
           setRawMode(false);
           process.stdout.write("\n");
           process.stdin.pause();
-          resolve();
+          exitLoop();
         }
         return;
       }
@@ -727,7 +1399,7 @@ async function terminalInputLoop() {
         setRawMode(false);
         process.stdout.write("\n");
         process.stdin.pause();
-        resolve();
+        exitLoop();
         return;
       }
 
@@ -758,8 +1430,12 @@ async function terminalInputLoop() {
 
       if (key.ctrl && key.name === "l") {
         renderedRows = 0;
-        renderedCursorRow = 0;
+        pendingCursorRow = 0;
+        // banner() uses console.log (bare \n); cook the terminal first so raw
+        // mode does not staircase the multi-line output.
+        setRawMode(false);
         banner();
+        setRawMode(true);
         render();
         return;
       }
@@ -781,10 +1457,7 @@ async function terminalInputLoop() {
           return;
         }
         submit().then(() => {
-          if (done) {
-            process.stdin.off("keypress", onKeypress);
-            resolve();
-          }
+          if (done) exitLoop();
         });
         return;
       }
@@ -843,6 +1516,17 @@ async function terminalInputLoop() {
         return;
       }
 
+      if (str === "?" && chars.length === 0) {
+        clearRender();
+        // printShortcuts() uses console.log; cook the terminal so raw mode does
+        // not staircase the overlay.
+        setRawMode(false);
+        printShortcuts();
+        setRawMode(true);
+        render();
+        return;
+      }
+
       if (str && !key.ctrl && !key.meta) {
         const inputChars = Array.from(str).filter((ch) => ch >= " " && ch !== "\x7f");
         if (inputChars.length) {
@@ -855,6 +1539,7 @@ async function terminalInputLoop() {
 }
 
 async function main() {
+  await playIntro();
   banner();
   const wantReadline = process.env.OMK_READLINE_REPL === "1";
   if (!wantReadline && process.stdin.isTTY && process.stdout.isTTY) {
