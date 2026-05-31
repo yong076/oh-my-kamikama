@@ -22,32 +22,37 @@
 </p>
 
 <p align="center">
-  <code>omk</code> asks Claude and Gemini to argue about your task, then makes Codex implement it.<br/>
-  Every run leaves <b>artifacts on disk</b> instead of one giant disappearing chat.
+  <code>omk</code> turns a native <code>claude</code> session into a <b>conductor</b>: it plans your task,
+  delegates each piece to <code>codex</code> / <code>claude</code> / <code>gemini</code>,<br/>
+  reads the <b>real git diff</b> the workers produced, runs your tests, and only then calls it done —
+  with every turn left as <b>artifacts on disk</b>.
 </p>
 
 ```bash
-omk "fix the failing auth test and verify it"
+omk "add an audit log to the admin actions and verify it"
 ```
 
 > *Oh my god? No. Oh my Kamisama.*
+
+<p align="center">
+  <img src="assets/omk-shell.png" alt="omk interactive shell — the conductor planning, delegating to codex, streaming a live worker board, and verifying with the test suite" width="680" />
+</p>
 
 ---
 
 ## Table of contents
 
 - [Why this exists](#why-this-exists)
-- [What it is](#what-it-is)
-- [Pipeline](#pipeline)
+- [How the conductor works](#how-the-conductor-works)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Interactive shell](#interactive-shell)
 - [Modes](#modes)
-- [Cockpit mode](#cockpit-mode-cmux)
 - [Artifacts on disk](#artifacts-on-disk)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
 - [Examples](#examples)
+- [Cockpit mode](#cockpit-mode-cmux)
 - [Where it fits](#where-it-fits-omo--omx--cmux)
 - [Design principles](#design-principles)
 - [Testing](#testing)
@@ -61,94 +66,73 @@ omk "fix the failing auth test and verify it"
 
 Most AI coding tools optimize for **one runtime**:
 
-| Tool | What it's great at | What it doesn't do |
+| Tool | Great at | Doesn't do |
 |---|---|---|
 | Codex layers | Codex workflows, hooks, skills, teams | Cross-provider second opinions |
 | Claude Code layers | Claude sessions, planning, permissions | Multi-executor handoff |
-| Gemini CLI | Independent third read | Long-running orchestration |
+| Gemini CLI | An independent third read | Long-running orchestration |
 | opencode / OMO | Terminal-native model lanes | Foreground/background packet routing |
-| OMX | Durable goals, teams, HUD | Independent advisor swarm |
-| cmux | Visible long-running panes | Run packets & artifacts |
+| OMX | Durable goals, teams, HUD | An independent advisor swarm |
 
-`omk` takes the boring but useful path: **keep the native tools installed and make them cooperate from one command**.
+`omk` takes the boring-but-useful path: **keep the native tools installed and make them cooperate from one command.**
 
-This is intentionally *not* a token-saving tool. The point is to **spend more agent attention** when the job is ambiguous, risky, or large enough that one model's first answer is not enough.
-
-> Agents are wish-granting machines. They often grant vague wishes literally.
-> `omk` borrows the divecode "genie principle": before the executor grants the wish, advisors should surface missing constraints, risks, gates, and verification.
-
----
-
-## What it is
-
-<p align="center">
-  <img src="assets/omk-kamisama.png" alt="Oh My Kamisama" width="360" />
-</p>
+It is intentionally *not* a token-saving tool. The point is to **spend more agent attention** when the job is ambiguous, risky, or large enough that one model's first answer isn't enough — and to make that work **visible and auditable** instead of hidden inside one disappearing chat.
 
 `oh-my-kamisama` is a **command layer above the AI coding CLIs you already use**. It does not replace Claude Code, Codex CLI, Gemini CLI, opencode, OMX, OMO, or cmux. It coordinates them.
 
-You give it one task. It asks multiple native coding agents to think about the task from different angles, **records their outputs as artifacts**, then hands the final execution to Codex with that context.
-
-It is especially good for:
-
-- *"I know what I want, but the implementation path is fuzzy."*
-- *"This can burn tokens, just make the result better."*
-- *"I want Claude/Gemini/Codex to all touch the problem, but not manually."*
-- *"I want long agent runs visible in cmux instead of hidden in one terminal."*
-
-It is not magic:
-
-- Each CLI still needs its own auth/login.
-- Advisor output is **context**, not authority.
-- Codex still has to inspect the repo and verify the change.
-- Failing agents are surfaced, not hidden.
+<p align="center">
+  <img src="assets/omk-kamisama.png" alt="Oh My Kamisama" width="320" />
+</p>
 
 ---
 
-## Pipeline
+## How the conductor works
 
-The current core pipeline:
+The headline mode (`omk conduct`, and the default for a plain task in the shell) makes a native `claude` session the **conductor**. It never edits files itself — it plans, delegates to worker CLIs, reads what they actually changed, and decides the next step. Each turn it returns a strict JSON envelope that `omk` renders into a live surface.
 
 ```text
-User task
-  ├─▶ Claude advisor  ─▶ writes claude.md   (plan-mode, read-only)
-  ├─▶ Gemini advisor  ─▶ writes gemini.md   (plan-mode, read-only)
-  └─▶ Codex executor  ─▶ reads both artifacts, implements, verifies, summarizes
-                        writes codex.prompt.md, codex.out, codex.err, RUN.md
+You: omk "add an audit log to the admin actions and verify it"
+
+  ┌─ conductor (a claude session) ──────────────────────────────────┐
+  │  • maintains a live ☐ / ◐ / ☑ plan you watch update each turn   │
+  │  • delegates each step to the right worker:                     │
+  │       codex   → implements        (workspace-write)             │
+  │       claude  → reasons / reviews (acceptEdits)                 │
+  │       gemini  → grunt work / web search                         │
+  │  • ◀── is fed the REAL `git diff` the workers produced          │
+  │  • runs your project's tests/build before it says "done"        │
+  └─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+   .omk/runs/<run>/  →  plan.json · turn-N.json · turn-N.diff
+                        session.json · verify-N.txt · <agent>.N.out
 ```
 
-Each advisor returns the same structured read:
+What makes it feel like Claude Code — and not like a black box:
 
-- Recommended approach
-- Dive questions
-- AI-DLC phase and gates *(Inception → Construction → Operations)*
-- Risks
-- Verification plan
-- What Codex should avoid
+- **Live plan checklist.** The conductor maintains an evolving `☐ / ◐ / ☑` plan and re-emits it every turn, so you always see where it is.
+- **Streaming workers.** Each delegation shows an animated status line with elapsed time, bytes streamed, and the worker's current activity (the file it's editing, the command it just ran) — not a frozen wait.
+- **Real diff awareness.** After every round the conductor is fed the *actual* `git diff` the workers produced, not their prose claim. Empty or wrong diffs get caught and re-delegated.
+- **Verification gate.** Before it declares the task done on a changed repo, `omk` runs the project's own tests/build (`npm test`, `cargo test`, `go test`, or a `make test` target) and feeds the result back. It won't quietly call unverified work "done."
+- **Parallel isolation.** When the conductor dispatches several writers at once, each runs in its own throwaway `git worktree` and the changes are merged back — concurrent agents can't stomp each other.
+- **Loud failures.** A worker timeout, crash, or quota error is surfaced the instant it happens, not buried in a digest.
+- **Resumable.** Every run persists its `claude` session id and turn history, so `omk resume` picks up exactly where you left off.
 
-The native calls are intentionally simple — provider auth, model selection, local policy, and account limits stay with the provider CLIs:
+> Agents are wish-granting machines, and they grant vague wishes literally. The conductor's job is to surface the missing constraints, see what actually changed, and verify it — before anyone calls it done.
 
-```text
-claude --print --permission-mode plan         "<advisor prompt>"
-gemini --skip-trust --approval-mode plan -p   "<advisor prompt>"
-codex  exec --skip-git-repo-check -C <repo>
-            -s workspace-write                "<executor prompt>"
-```
-
-For longer work, `omk` runs in the background and opens a cmux cockpit:
+The worker calls stay deliberately native — provider auth, model selection, and account limits live in the provider CLIs:
 
 ```text
-omk cockpit
-  └─▶ cmux workspace
-       ├─ left pane:  omk watch   (status, pid, stdout/stderr tail)
-       └─ right pane: omk bg + omk tail
+claude -p --output-format json --permission-mode acceptEdits   "<worker task>"
+codex  exec --skip-git-repo-check --json -s workspace-write     "<worker task>"
+gemini --skip-trust --approval-mode auto_edit -p                "<worker task>"
 ```
 
 ---
 
 ## Install
 
-### From npm (when published)
+### From npm
 
 ```bash
 npm install -g oh-my-kamisama
@@ -162,18 +146,18 @@ cd oh-my-kamisama
 npm install -g .
 ```
 
-### Run directly without install
+### Run directly without installing
 
 ```bash
 ./bin/omk doctor
 ./bin/omk "summarize this repo and suggest the first safe improvement"
 ```
 
-> `npm install -g .` runs the Agent Cat Connectors installer automatically unless `OMK_SKIP_AGENTCAT_INSTALL=1` is set. You can also run it manually with `omk connect`.
+> `npm install -g .` runs the Agent Cat Connectors installer automatically unless `OMK_SKIP_AGENTCAT_INSTALL=1` is set. You can also run it later with `omk connect`.
 
 ### Requirements
 
-**Core:**
+**Core**
 
 - `claude` CLI — authenticated
 - `codex` CLI — authenticated
@@ -181,19 +165,19 @@ npm install -g .
 - macOS, Linux, or WSL with Bash
 - Node.js 20+
 
-**Optional:**
+**Optional**
 
-- `cmux` — for cockpit mode
-- `omx` / `oh-my-codex` — for future durable goal/team adapters
-- `opencode` — for future scout/reviewer lanes
+- `cmux` — cockpit mode
+- `omx` / `oh-my-codex` — future durable goal/team adapters
+- `opencode` — future scout/reviewer lanes
 - `agentcat` / Agent Cat Connectors — usage, quota, and activity snapshots
 
 ### Verify your setup
 
 ```bash
-omk doctor    # checks command surface (does not replace provider auth checks)
+omk doctor    # checks the command surface (not provider auth)
 omk tools     # lists what omk can call
-omk agents    # shows live quota/activity (needs Agent Cat Connectors)
+omk agents    # live quota/activity (needs Agent Cat Connectors)
 ```
 
 ---
@@ -207,114 +191,64 @@ cd /path/to/repo
 omk
 ```
 
-Or run a one-shot task:
+…then just type a task. In the shell, a plain task runs the **conductor**.
+
+Or run it one-shot:
 
 ```bash
-omk "fix the failing parser regression and run the focused tests"
+omk conduct --repo ~/work/app "fix the failing parser regression and run the focused tests"
+omk resume  --repo ~/work/app            # pick the last run back up
 ```
 
-By default, a plain task uses `omk auto`. Auto mode reads Agent Cat quota and availability, prefers Codex/Claude, and only falls back to Gemini when Codex and Claude are unavailable. Gemini fallback **asks for confirmation** in interactive runs because Gemini quota can be precious or tied to a different account.
+> A bare `omk "task"` on the command line uses quota-aware single-executor [`omk auto`](#omk-auto--quota-aware-routing). For the full multi-agent loop from the CLI, use `omk conduct` (it's the default when you type a task **inside** the shell).
 
 ### Common one-liners
 
 ```bash
-# Full three-lane pipeline against another repo
-omk run --repo ~/work/app "fix checkout coupon validation and run tests"
+# The conductor against another repo
+omk conduct --repo ~/work/app "build the admin audit view with tests"
 
-# Advisors only (no code changes)
-omk advise --repo ~/work/app "review the safest migration path for user_roles"
+# Advisors only — a decision, not a code edit
+omk advise  --repo ~/work/app "review the safest migration path for user_roles"
 
-# Background job + tail
+# A long run in the background, watched
 omk bg   --repo ~/work/app "refactor the settings screen and verify it"
 omk ps   --repo ~/work/app
 omk tail --repo ~/work/app latest
-
-# cmux cockpit for long work
-omk cockpit --repo ~/work/app "ship the feature with tests and notes"
 ```
 
 ---
 
 ## Interactive shell
 
-<p align="center">
-  <img src="assets/omk-shell.png" alt="omk interactive shell — the conductor planning, delegating to codex, streaming a live worker board, and verifying with the test suite" width="660" />
-</p>
-
-With no arguments in an interactive terminal, `omk` opens a small REPL with a Claude-Code-style launch screen and live agent status:
+With no arguments in an interactive terminal, `omk` opens a small REPL with a Claude-Code-style launch screen, live agent status, and the conductor wired in (see the screenshot up top):
 
 ```text
-╭ Oh My Kamisama v0.8.0 ────────────────────────────────────────────────╮
-│ repo:  ~/work/app                                                      │
-│ mode:  auto                                                            │
-│ route: claude                                                          │
-│ state: walking                                                         │
-├───────────────────────────────────────────────────────────────────────┤
-│ agents: Codex 70% 7d ok | Claude 92% 7d ok | Gemini 94% daily ok       │
-├───────────────────────────────────────────────────────────────────────┤
-│ try:   describe a task, /mode cockpit, /advise <question>              │
-│ keys:  Enter run  Shift+Enter newline  Ctrl+L redraw                   │
-╰───────────────────────────────────────────────────────────────────────╯
-mode:auto  route:claude  repo:~/work/app  /help /agents /context /exit
-
-type a task, /agents for detail, /context for repo, /exit to quit
-
-🐱
+╭ ✻ Welcome to Oh My Kamisama! v0.8.0 ──────────────────────────╮
+│   cwd:   ~/work/app                                            │
+│   mode:  conduct    route: codex    state: working            │
+│   Codex 71% 7d · Claude 92% 7d · Gemini 96% daily             │
+╰────────────────────────────────────────────────────────────────╯
+🐱 add an audit log to admin actions and verify it
 ```
 
-Plain text is treated as a task and runs in the current mode. Slash commands control the shell:
-
-TTY sessions use the Claude-Code-style terminal editor in `bin/omk-repl.js` for
-normal terminal editing: backspace, arrow movement, multiline input, and command
-history.
-Non-interactive stdin keeps the Bash fallback so tests and scripts remain
-simple.
-
-Multiline prompts work like Claude Code: Shift+Enter or Meta+Enter inserts a
-newline when your terminal sends that key distinctly, and backslash+Enter always
-continues on the next line. Set `OMK_READLINE_REPL=1` to use the simpler
-readline fallback.
+Plain text is treated as a task and runs in the current mode. The TTY shell uses a real terminal editor (`bin/omk-repl.js`): arrow movement, multiline input (Shift/Meta+Enter or `\`+Enter), history, slash autocomplete, and a live conductor surface. Non-interactive stdin falls back to a simpler Bash loop so scripts and tests stay clean.
 
 | Command | What it does |
 |---|---|
-| `/conduct TASK` | Run the multi-agent conductor loop (plan, delegate, diff, verify) |
+| `/conduct TASK` | Run the multi-agent conductor (plan, delegate, diff, verify) |
 | `/resume [run\|latest]` | Resume a previous conductor run |
-| `/mode auto` | Choose the executor from Agent Cat quota/availability |
-| `/mode conduct` | Make plain tasks run the conductor |
-| `/mode run` | Full Claude + Gemini + Codex pipeline |
-| `/mode claude` | Direct Claude executor |
-| `/mode gemini` | Direct Gemini executor |
-| `/mode advise` | Advisors only — no code changes |
-| `/mode bg` | Start background jobs |
-| `/mode cockpit` | Open a cmux cockpit for each task |
+| `/mode conduct\|auto\|run\|claude\|gemini\|advise\|bg\|cockpit` | Set how plain tasks run |
 | `/agents` | Refresh status, quota, activity, suggested route |
-| `/refresh` | Redraw the launch screen |
-| `/screen` | Print the compact status panel |
-| `/route` | Print the current auto route |
-| `/connect` | Install/check Agent Cat Connectors |
-| `/context` | Show repo branch, scripts, surfaces, route |
-| `/diff` | Show git status and diff stats |
-| `/cost` | Show Agent Cat usage/cost summary |
-| `/tasks` | List the local `.omk` task queue |
-| `/task TEXT` | Add a local task |
-| `/done ID` | Mark a local task done |
+| `/context` | Repo branch, scripts, surfaces, route |
+| `/diff` | Git status and diff stats |
+| `/cost` | Agent Cat usage/cost summary |
+| `/tasks`, `/task TEXT`, `/done ID` | Local `.omk` task queue |
+| `/ps`, `/logs latest`, `/tail latest`, `/watch latest`, `/kill latest` | Background job controls |
 | `/repo PATH` | Switch target repository |
-| `/ps`, `/logs latest`, `/tail latest` | Background job controls |
+| `/refresh`, `/screen`, `/route`, `/connect`, `/tools`, `/status`, `/doctor` | Status & setup |
 | `/! git status` | Run a shell command inside the repo |
-| `/exit` | Quit |
-
-Example session:
-
-```text
-$ omk
-🐱 review the settings bug and fix it with tests
-🐱 /agents
-🐱 /mode cockpit
-🐱 build the admin audit view and verify it
-🐱 /exit
-```
-
-> The shell deliberately mirrors the useful parts of modern coding-agent CLIs: slash commands, quick repo context, usage/cost views, diff views, and a small local task queue. It does not embed or reuse proprietary agent source code.
+| `/help`, `/shortcuts`, `/exit` | Help, keys, quit |
 
 ---
 
@@ -322,178 +256,107 @@ $ omk
 
 ### `omk conduct` — the multi-agent conductor
 
-The headline mode. A native `claude` session becomes the **conductor**: it never edits files itself — it plans the work, delegates each piece to a worker CLI (`codex` to implement, `claude` to reason/review, `gemini` for grunt work/search), then synthesizes the results and decides the next step. It returns a strict JSON envelope each turn, which `omk` turns into a live surface.
+The headline mode. A `claude` session plans, delegates to `codex` / `claude` / `gemini`, reads the real diff, and verifies — see [How the conductor works](#how-the-conductor-works).
 
 ```bash
 omk conduct --repo ~/work/app "add an audit log to the admin actions and verify it"
 ```
 
-What makes it feel like Claude Code:
-
-- **Live plan checklist** — the conductor maintains an evolving `☐ / ◐ / ☑` plan you watch update each turn.
-- **Streaming workers** — each delegation shows an animated status line with elapsed time, bytes streamed, and the worker's current activity (the file it's editing, the command it ran) instead of a frozen wait.
-- **Real diff awareness** — after every delegation round the conductor is fed the *actual* `git diff` the workers produced (not just their prose claim), so it reasons over reality and catches no-op or wrong edits.
-- **Verification gate** — before it declares the task done on a changed repo, `omk` runs the project's own tests/build (`npm test`, `cargo test`, `go test`, or a `make test` target) and feeds the result back. It won't quietly call unverified work "done."
-- **Parallel isolation** — when the conductor dispatches several writers at once, each runs in its own throwaway `git worktree` and the changes are merged back, so concurrent agents can't stomp each other.
-- **Loud failures** — a worker timeout, crash, or quota error is surfaced the instant it happens, not buried.
-
-Every turn, the plan, the diff (`turn-N.diff`), each worker's output, and the session id are written under `.omk/runs/<run>/`, so a run is fully auditable — and resumable.
-
-In the interactive shell, a plain task in the default `auto`/`conduct` mode runs the conductor. (`omk "task"` from the command line still uses single-executor `omk auto` — see below.)
-
-Tunables: `OMK_CONDUCT_MAX_TURNS`, `OMK_CONDUCT_CONCURRENCY`, `OMK_CONDUCT_VERIFY=0` (skip the gate), `OMK_CONDUCT_WORKTREES=0` (run in-repo).
+Tunables: `OMK_CONDUCT_MAX_TURNS`, `OMK_CONDUCT_CONCURRENCY`, `OMK_CONDUCT_VERIFY=0` (skip the test gate), `OMK_CONDUCT_WORKTREES=0` (run in-repo instead of isolated worktrees).
 
 ### `omk resume` — continue a previous conductor run
 
-Every conductor run persists its `claude` session id and turn history. `omk resume` picks up where you left off — same session, appended turns, with the current repo diff replayed to the conductor.
+Every run persists its session id and turn history. `omk resume` reuses them, replays the current repo diff to the conductor, and continues.
 
 ```bash
-omk resume --repo ~/work/app            # resume the latest run
+omk resume --repo ~/work/app                # the latest run
 omk resume --repo ~/work/app 2026-05-30T17-15-26Z-build-the-feature
 ```
 
-### `omk auto` — quota-aware routing
+### `omk auto` — quota-aware single executor
 
-Auto mode checks Agent Cat Connectors, displays the current provider picture, and chooses the executor:
+Checks Agent Cat Connectors and runs **one** executor directly:
 
 1. Prefer Codex or Claude when either is available.
-2. Between Codex and Claude, choose the one with **higher remaining quota**.
-3. Use Gemini only when Codex and Claude are unavailable.
-4. **Ask before using Gemini** unless `OMK_ALLOW_GEMINI_FALLBACK=1` is set.
+2. Between them, pick the higher **remaining quota**.
+3. Use Gemini only when both are unavailable — and **ask first** unless `OMK_ALLOW_GEMINI_FALLBACK=1`.
 
 ```bash
 omk auto --repo ~/work/app "fix the billing export and verify it"
 ```
 
-If Agent Cat Connectors are missing, `omk` tries to install them. If usage snapshot data is unavailable, auto mode falls back to plain CLI availability.
+### `omk run` — the advisor pipeline
 
-### `omk run` — full foreground pipeline
-
-The original three-lane pipeline: Claude advisor → Gemini advisor → Codex executor. The terminal blocks until the agents finish.
+The original three-lane pipeline: a Claude advisor and a Gemini advisor each write a structured read (approach, dive questions, AI-DLC gates, risks, verification), then Codex implements with both artifacts in context.
 
 ```bash
 omk run --repo ~/work/app "fix checkout coupon validation and run tests"
 ```
 
-### `omk claude` / `omk gemini` — direct executor
-
-Skip the advisor swarm and use a single provider directly. Auto mode normally asks before falling back to Gemini, but `omk gemini` runs Gemini because *you* asked for it.
-
-```bash
-omk claude --repo ~/work/app "fix the settings crash and summarize verification"
-omk gemini --repo ~/work/app "fix the docs generator"
-```
-
 ### `omk advise` — advisors only
 
-Use when the next step should be a **decision, not a code edit**. Claude and Gemini produce their structured reads; Codex is not invoked.
+When the next step should be a **decision, not a code edit**. Claude and Gemini produce their reads; no executor runs.
 
 ```bash
 omk advise --repo ~/work/app "should we move this cache into Redis?"
 ```
 
+### `omk claude` / `omk gemini` — direct executor
+
+Skip routing and use one provider directly.
+
+```bash
+omk claude --repo ~/work/app "fix the settings crash and summarize verification"
+```
+
 ### `omk bg` — background jobs
 
-Starts the same pipeline through a background supervisor and writes job state under `.omk/bg/`.
+Runs the pipeline through a background supervisor with inspectable job state under `.omk/bg/`. The supervisor and `omk kill` tear down the **whole** worker process tree, not just the launcher.
 
 ```bash
 omk bg   --repo ~/work/app "modernize the billing settings page"
 omk ps   --repo ~/work/app
-omk logs --repo ~/work/app latest
 omk tail --repo ~/work/app latest
-omk kill --repo ~/work/app latest    # if you need to stop one
-```
-
----
-
-## Cockpit mode (cmux)
-
-`omk cockpit` creates a cmux workspace with two panes:
-
-```text
-┌──────────────────────────────┬──────────────────────────────┐
-│  omk watch                   │  omk bg "<task>"             │
-│  ─────────                   │  omk tail latest             │
-│  status: running             │                              │
-│  pid:    48211               │  [10:24:31] planner    ok    │
-│  stdout tail: ...            │  [10:24:32] researcher ok    │
-│  stderr tail: ...            │  [10:24:35] coder      ok    │
-│                              │  [10:24:37] reviewer   ok    │
-│                              │  [10:24:39] optimizer  ok    │
-└──────────────────────────────┴──────────────────────────────┘
-```
-
-```bash
-omk cockpit --repo ~/work/app "finish the dashboard filters and verify e2e"
-```
-
-Use this when the work may take a while and you want a **visible control room** instead of a hidden background process.
-
-This is the foundation for the bigger vision: `omk` as a cmux-native agent cockpit where Claude, Codex, Gemini, OMX, OMO, opencode, QA, review, and release lanes can become visible panes instead of hidden subprocesses.
-
-### Watch dashboard
-
-```bash
-omk watch --repo ~/work/app latest
-
-# custom refresh interval (seconds)
-OMK_WATCH_INTERVAL=5 omk watch --repo ~/work/app latest
+omk kill --repo ~/work/app latest
 ```
 
 ---
 
 ## Artifacts on disk
 
-Every foreground run creates a timestamped artifact directory:
+Every conductor run leaves a timestamped, auditable, resumable packet:
 
 ```text
 .omk/runs/<timestamp>-<task>/
-├── RUN.md              ← final summary packet
-├── task.txt            ← original task text
-├── claude.md           ← Claude advisor: approach, risks, verification, what-to-avoid
-├── gemini.md           ← Gemini advisor: same shape, independent reasoning
-├── codex.prompt.md     ← exact prompt Codex received
-├── codex.out           ← Codex stdout
-└── codex.err           ← Codex stderr
+├── task.txt            ← the original task
+├── session.json        ← claude session id + status (used by `omk resume`)
+├── plan.json           ← the latest ☐/◐/☑ plan
+├── turn-0.json         ← each conductor turn: message in, envelope out
+├── turn-0.diff         ← the real git diff after that round
+├── codex.0.out         ← each worker's captured output
+└── verify-1.txt        ← the verification (tests/build) result
 ```
 
-Background runs add a supervisor record:
+The advisor pipeline (`omk run` / `omk advise`) writes its own packet (`RUN.md`, `claude.md`, `gemini.md`, `codex.out/err`), and `omk bg` adds a supervisor record (`status`, `pid`, `stdout.log`, `stderr.log`, `run_dir.txt`).
 
-```text
-.omk/bg/<timestamp>-<task>/
-├── status              ← queued | running | done | failed
-├── pid
-├── started.txt
-├── finished.txt
-├── task.txt
-├── repo.txt
-├── stdout.log
-├── stderr.log
-└── run_dir.txt         ← pointer to the .omk/runs/... packet
-```
-
-This means:
-
-- **Failures are debuggable** — every advisor lane leaves diagnostics even when it crashes.
-- **Successful advice is reusable** — `claude.md` and `gemini.md` are plain markdown.
-- **Reviews can be async** — open `RUN.md` later; no scrollback to hunt through.
+This means **failures are debuggable**, **good advice is reusable**, and **reviews can be async** — open the packet later instead of hunting through scrollback.
 
 ---
 
 ## Command reference
 
 ```bash
-omk                                      # interactive shell
-omk "task"                               # one-shot in auto mode
+omk                                      # interactive shell (a plain task → conductor)
+omk "task"                               # one-shot, quota-aware auto
 omk shell    [--repo PATH]               # explicit shell for a workspace
 
 omk conduct  [--repo PATH] "task"        # multi-agent conductor (plan/delegate/diff/verify)
 omk resume   [--repo PATH] [run|latest]  # resume a previous conductor run
-omk auto     [--repo PATH] "task"        # quota-aware routing
-omk run      [--repo PATH] "task"        # full three-lane pipeline
+omk auto     [--repo PATH] "task"        # quota-aware single executor
+omk run      [--repo PATH] "task"        # advisor pipeline (Claude + Gemini → Codex)
+omk advise   [--repo PATH] "task"        # advisors only
 omk claude   [--repo PATH] "task"        # direct Claude executor
 omk gemini   [--repo PATH] "task"        # direct Gemini executor
-omk advise   [--repo PATH] "task"        # advisors only
 
 omk bg       [--repo PATH] "task"        # background pipeline
 omk cockpit  [--repo PATH] "task"        # cmux cockpit + bg
@@ -526,57 +389,66 @@ Behavior is controlled with environment variables. None are required.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `OMK_KEEP_GOING` | unset | When set, `omk run` proceeds to Codex even if an advisor fails (failed advisor still writes its artifact + diagnostics). |
-| `OMK_ALLOW_GEMINI_FALLBACK` | unset | When set, auto mode falls back to Gemini **without** asking for interactive confirmation. |
-| `OMK_SKIP_AGENTCAT_INSTALL` | unset | Skip the Agent Cat Connectors installer during `npm install -g`. |
+| `OMK_CONDUCT_MAX_TURNS` | `12` | Max conductor turns before it stops. |
+| `OMK_CONDUCT_CONCURRENCY` | `3` | Max workers run in parallel per round. |
+| `OMK_CONDUCT_VERIFY` | on | Set `0` to skip the test/build gate before `done`. |
+| `OMK_CONDUCT_WORKTREES` | on | Set `0` to run parallel writers in-repo instead of isolated git worktrees. |
+| `OMK_DELEGATE_TIMEOUT_MS` | `180000` | Per-worker timeout. |
+| `OMK_ALLOW_GEMINI_FALLBACK` | unset | Auto mode falls back to Gemini **without** asking. |
+| `OMK_KEEP_GOING` | unset | `omk run` proceeds to Codex even if an advisor fails. |
+| `OMK_SKIP_AGENTCAT_INSTALL` | unset | Skip the Agent Cat Connectors installer on `npm install`. |
 | `OMK_WATCH_INTERVAL` | `2` | Refresh interval (seconds) for `omk watch`. |
-| `OMK_INPUT_BG` | dark input bar | Set to `none` to disable the colored interactive input row. |
-| `OMK_READLINE_REPL` | unset | Set to `1` to use the simpler readline fallback instead of the Claude-Code-style terminal editor. |
+| `OMK_READLINE_REPL` | unset | Use the simpler readline shell instead of the terminal editor. |
+| `OMK_NO_INTRO` / `OMK_ASCII` | unset | Skip the animated intro / drop color and emoji. |
 
 ---
 
 ## Examples
 
-### Fix a bug with multiple reads
+### Ship a feature, verified
 
 ```bash
-omk --repo ~/work/api "fix the refresh-token race and add a regression test"
+omk conduct --repo ~/work/api "add rate limiting to the public API and add tests"
 ```
 
-What happens:
+The conductor plans the steps, has codex implement them (in an isolated worktree), reads the diff back, runs `npm test`, and only reports done when it's green.
 
-1. Claude lists risks and missing constraints.
-2. Gemini provides an independent failure-mode read.
-3. Codex implements the fix with both artifacts in context.
-4. You get `.omk/runs/<timestamp>.../RUN.md` for review.
+### Pick a long run back up
 
-### Ask for plan pressure before implementation
+```bash
+omk conduct --repo ~/work/api "migrate user_roles to the new schema"
+# …step away, come back…
+omk resume  --repo ~/work/api
+```
+
+### Plan pressure before any edit
 
 ```bash
 omk advise --repo ~/work/api "review the safest migration path for user_roles"
 ```
 
-Use this when the next step should be a decision, not a code edit.
-
-### Start a long run and come back later
+### Start a long run and walk away
 
 ```bash
 omk bg   --repo ~/work/site "replace the old theme tokens and verify screenshots"
-omk ps   --repo ~/work/site
 omk tail --repo ~/work/site latest
-omk logs --repo ~/work/site latest    # final packet once done
 ```
 
-### Open a cmux cockpit
+---
+
+## Cockpit mode (cmux)
+
+`omk cockpit` opens a cmux workspace with a watch pane and a runner pane, so long work is a **visible control room** instead of a hidden background process:
 
 ```bash
 omk cockpit --repo ~/work/product "build the first pass of the admin audit view"
 ```
 
-### Continue even if an advisor fails
-
-```bash
-OMK_KEEP_GOING=1 omk --repo ~/work/app "continue even if one advisor is down"
+```text
+┌─ watch ──────────────────────┬─ runner ─────────────────────┐
+│  status: running             │  omk bg + omk tail           │
+│  stdout/stderr tail …        │  live log …                  │
+└──────────────────────────────┴──────────────────────────────┘
 ```
 
 ---
@@ -587,78 +459,64 @@ OMK_KEEP_GOING=1 omk --repo ~/work/app "continue even if one advisor is down"
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│  omk          ← run packet, artifacts, routing, cockpit  │
+│  omk        ← conductor, run packets, artifacts, routing │
 ├──────────────────────────────────────────────────────────┤
-│  Claude   ─ independent advisor   (plan-mode, read-only) │
-│  Gemini   ─ independent advisor   (plan-mode, read-only) │
-│  Codex    ─ final executor        (workspace-write)      │
+│  codex    ─ implementation executor   (workspace-write)  │
+│  claude   ─ conductor + reasoning/review worker          │
+│  gemini   ─ grunt work / web search worker               │
 ├──────────────────────────────────────────────────────────┤
 │  opencode ─ optional scout / reviewer lane               │
 │  OMO      ─ optional model lane / terminal-native flow   │
 │  OMX      ─ optional durable goals, teams, HUD           │
-│  cmux     ─ visible pane / long-running runtime          │
+│  cmux     ─ visible panes / long-running runtime         │
 │  agentcat ─ live quota, activity, cost snapshots         │
 └──────────────────────────────────────────────────────────┘
 ```
 
-`omk` does not replace any of them. It is the conductor that asks them to play together.
-
-See [`docs/strategy.md`](docs/strategy.md) and [`docs/competitive-scan.md`](docs/competitive-scan.md) for the longer roadmap.
+`omk` does not replace any of them. It is the conductor that asks them to play together. See [`docs/strategy.md`](docs/strategy.md) and [`docs/competitive-scan.md`](docs/competitive-scan.md) for the longer roadmap.
 
 ---
 
 ## Design principles
 
 - **Native CLIs stay native.** `omk` coordinates; it does not impersonate providers.
-- **Artifacts beat memory.** Every run should leave inspectable files.
-- **Advisors widen context.** Executors still own final judgment.
-- **Visibility matters.** Long-running work should be watchable.
-- **Failures are data.** A failed lane should produce diagnostics, not disappear.
+- **Diffs beat claims.** The conductor reasons over what actually changed on disk.
+- **Verify before "done."** Unverified work isn't finished work.
+- **Artifacts beat memory.** Every run leaves inspectable files you can resume from.
+- **Visibility matters.** Long-running work should be watchable, and failures should be loud.
 - **Token thrift is not the north star.** Better outcomes are.
 
 ---
 
 ## Testing
 
-Run the local test suite (offline, no model tokens):
+The local suite is fully offline — it uses fake `claude` / `codex` / `gemini` / `cmux` commands and burns no model tokens:
 
 ```bash
 npm test
 ```
 
-The suite uses fake `claude`, `gemini`, `codex`, and `cmux` commands for offline coverage of:
+It covers the advisor pipeline, cockpit generator, shell modes and slash commands, auto-routing, repo surface detection, the Node REPL, and the conductor — including the plan/diff/worktree/verify path, resume, and the REPL→conductor wiring.
 
-- pipeline shape
-- cockpit generator
-- shell mode + slash commands
-- auto-routing decisions
-- repo surface detection
-
-For a real quantitative smoke test against live providers:
+For a real quantitative smoke against live providers:
 
 ```bash
 scripts/quant-smoke.sh 2
 ```
 
-That installs the local package globally, runs `omk run` repeatedly, and writes a CSV with run status, duration, Claude/Gemini advisor exit codes, Codex sentinel detection, artifact count, and run directory.
-
-> Use the quantitative smoke only when you actually want live model calls.
-
 ---
 
 ## Roadmap
 
-Near-term:
+Shipped in the conductor: live plan, streaming workers, real-diff awareness, the verification gate, worktree isolation, and resume.
 
-- [ ] OMX adapter — push omk run packets into OMX as durable goals
-- [ ] OMO scout lane — terminal-native fourth opinion
-- [ ] opencode reviewer lane — post-execution review pass
-- [ ] cockpit v2 — review / QA / release lanes as additional panes
-- [ ] richer Agent Cat usage views in the shell header
+Next:
 
-Longer-term:
-
-- A practical agent control room: one command starts the work, one place shows what is running, every lane leaves files you can inspect later.
+- [ ] Unify plain-task routing so `omk "task"` and the shell behave identically
+- [ ] `omk bg --conduct` to background the conductor (not just the advisor pipeline)
+- [ ] OMX adapter — push run packets into OMX as durable goals
+- [ ] opencode / OMO scout + reviewer lanes
+- [ ] cockpit v2 — review / QA / release lanes as panes
 
 ---
 
